@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for RustTube, a high-performance personal YouTube desktop client built in Rust with Slint UI, libmpv rendering, yt-dlp extraction, and Google OAuth2/Windows Credential Manager integration.",
-  "updatedAt":  "2026-10-30T06:19:09.709636818Z",
+  "summary":  "Migration plan and system architecture for RustTube native Windows desktop application using egui + eframe, SQLite (rusqlite), Google OAuth PKCE, YouTube Data API v3, yt-dlp, and libmpv.",
+  "updatedAt":  "2026-10-30T08:50:14.112201634Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

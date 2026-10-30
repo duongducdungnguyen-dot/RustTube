@@ -312,4 +312,139 @@ impl YouTubeApiClient {
         }
         Ok(())
     }
+
+    pub async fn create_playlist(
+        &self,
+        access_token: &str,
+        title: &str,
+        description: &str,
+        is_private: bool,
+    ) -> Result<PlaylistItem> {
+        let url = format!("{}/playlists?part=snippet,status", self.base_url);
+        let privacy_status = if is_private { "private" } else { "public" };
+        let body = serde_json::json!({
+            "snippet": {
+                "title": title,
+                "description": description,
+            },
+            "status": {
+                "privacyStatus": privacy_status
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to create playlist: {}", resp.status()));
+        }
+
+        let json: Value = resp.json().await?;
+        let id = json["id"].as_str().unwrap_or_default().to_string();
+        let snippet = &json["snippet"];
+        let res_title = snippet["title"].as_str().unwrap_or(title).to_string();
+        let res_desc = snippet["description"].as_str().unwrap_or(description).to_string();
+
+        Ok(PlaylistItem {
+            id,
+            title: res_title,
+            description: res_desc,
+            video_count: 0,
+            thumbnail_url: String::new(),
+        })
+    }
+
+    pub async fn insert_playlist_item(
+        &self,
+        access_token: &str,
+        playlist_id: &str,
+        video_id: &str,
+    ) -> Result<String> {
+        let url = format!("{}/playlistItems?part=snippet", self.base_url);
+        let body = serde_json::json!({
+            "snippet": {
+                "playlistId": playlist_id,
+                "resourceId": {
+                    "kind": "youtube#video",
+                    "videoId": video_id
+                }
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to add video to playlist: {}", resp.status()));
+        }
+
+        let json: Value = resp.json().await?;
+        let item_id = json["id"].as_str().unwrap_or_default().to_string();
+        Ok(item_id)
+    }
+
+    pub async fn delete_playlist_item(&self, access_token: &str, playlist_item_id: &str) -> Result<()> {
+        let url = format!("{}/playlistItems?id={}", self.base_url, playlist_item_id);
+        let resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to remove playlist item: {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    pub async fn subscribe_channel(&self, access_token: &str, channel_id: &str) -> Result<()> {
+        let url = format!("{}/subscriptions?part=snippet", self.base_url);
+        let body = serde_json::json!({
+            "snippet": {
+                "resourceId": {
+                    "kind": "youtube#channel",
+                    "channelId": channel_id
+                }
+            }
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to subscribe to channel: {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    pub async fn unsubscribe_channel(&self, access_token: &str, subscription_id: &str) -> Result<()> {
+        let url = format!("{}/subscriptions?id={}", self.base_url, subscription_id);
+        let resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to unsubscribe from channel: {}", resp.status()));
+        }
+        Ok(())
+    }
 }

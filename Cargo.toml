@@ -7,6 +7,7 @@ members = [
     "crates/auth",
     "crates/api",
     "crates/cache",
+    "crates/storage",
 ]
 resolver = "2"
 
@@ -22,6 +23,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 slint = { version = "1.9", features = ["renderer-femtovg"] }
 slint-build = "1.9"
+eframe = "0.29"
+egui = "0.29"
+egui_extras = { version = "0.29", features = ["image"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 oauth2 = "4.4"
 keyring = { version = "3.6", features = ["windows-native"] }
