@@ -447,4 +447,163 @@ impl YouTubeApiClient {
         }
         Ok(())
     }
+
+    pub async fn get_channel_detail(
+        &self,
+        access_token: Option<&str>,
+        channel_id: &str,
+    ) -> Result<rusttube_core::models::ChannelDetail> {
+        let url = format!(
+            "{}/channels?part=snippet,contentDetails,statistics,brandingSettings&id={}",
+            self.base_url, channel_id
+        );
+        let mut req = self.client.get(&url);
+        if let Some(token) = access_token {
+            req = req.bearer_auth(token);
+        }
+
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("YouTube API channel error: {}", resp.status()));
+        }
+
+        let json: Value = resp.json().await?;
+        let item = json["items"]
+            .as_array()
+            .and_then(|a| a.first())
+            .ok_or_else(|| anyhow!("Channel {} not found", channel_id))?;
+
+        let snippet = &item["snippet"];
+        let stats = &item["statistics"];
+        let content_details = &item["contentDetails"];
+        let branding = &item["brandingSettings"];
+
+        let title = snippet["title"].as_str().unwrap_or("YouTube Channel").to_string();
+        let description = snippet["description"].as_str().unwrap_or_default().to_string();
+        let avatar_url = snippet["thumbnails"]["high"]["url"]
+            .as_str()
+            .or_else(|| snippet["thumbnails"]["default"]["url"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        let banner_url = branding["image"]["bannerExternalUrl"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+
+        let sub_count = stats["subscriberCount"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        let video_count = stats["videoCount"]
+            .as_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let uploads_playlist_id = content_details["relatedPlaylists"]["uploads"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+
+        let subscriber_text = if sub_count >= 1_000_000 {
+            format!("{:.1}M subscribers", sub_count as f64 / 1_000_000.0)
+        } else if sub_count >= 1_000 {
+            format!("{:.1}K subscribers", sub_count as f64 / 1_000.0)
+        } else if sub_count > 0 {
+            format!("{} subscribers", sub_count)
+        } else {
+            "Subscribers hidden".to_string()
+        };
+
+        Ok(rusttube_core::models::ChannelDetail {
+            item: ChannelItem {
+                id: channel_id.to_string(),
+                title,
+                description,
+                subscriber_count: sub_count,
+                avatar_url,
+            },
+            uploads_playlist_id,
+            banner_url,
+            subscriber_text,
+            video_count,
+        })
+    }
+
+    pub async fn get_personalized_feed(&self, access_token: &str) -> Result<Vec<VideoItem>> {
+        let (subs, _) = self.get_subscriptions(access_token, None).await?;
+        let mut feed_videos = Vec::new();
+
+        // Fetch recent uploads for top subscribed channels
+        for ch in subs.iter().take(8) {
+            if let Ok(ch_detail) = self.get_channel_detail(Some(access_token), &ch.id).await {
+                if !ch_detail.uploads_playlist_id.is_empty() {
+                    if let Ok(items) = self.get_playlist_items(access_token, &ch_detail.uploads_playlist_id).await {
+                        feed_videos.extend(items);
+                    }
+                }
+            }
+        }
+
+        // Deduplicate and sort by publication time if available
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+
+        for item in feed_videos {
+            if !item.id.is_empty() && seen.insert(item.id.clone()) {
+                result.push(item);
+            }
+        }
+
+        Ok(result)
+    }
+
+    pub async fn update_playlist(
+        &self,
+        access_token: &str,
+        playlist_id: &str,
+        title: &str,
+        description: &str,
+        is_private: bool,
+    ) -> Result<()> {
+        let url = format!("{}/playlists?part=snippet,status", self.base_url);
+        let privacy_status = if is_private { "private" } else { "public" };
+        let body = serde_json::json!({
+            "id": playlist_id,
+            "snippet": {
+                "title": title,
+                "description": description
+            },
+            "status": {
+                "privacyStatus": privacy_status
+            }
+        });
+
+        let resp = self
+            .client
+            .put(&url)
+            .bearer_auth(access_token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to update playlist: {}", resp.status()));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_playlist(&self, access_token: &str, playlist_id: &str) -> Result<()> {
+        let url = format!("{}/playlists?id={}", self.base_url, playlist_id);
+        let resp = self
+            .client
+            .delete(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to delete playlist: {}", resp.status()));
+        }
+        Ok(())
+    }
 }

@@ -1,6 +1,7 @@
 use crate::theme::THEME;
 use egui::{RichText, Ui};
 use rusttube_auth::GoogleUserInfo;
+use rusttube_core::models::AppUpdateInfo;
 
 pub fn render_settings_view(
     ui: &mut Ui,
@@ -8,10 +9,14 @@ pub fn render_settings_view(
     is_authenticating: bool,
     cookies_browser: &mut String,
     hwdec_setting: &mut String,
+    update_info: Option<&AppUpdateInfo>,
+    is_checking_update: bool,
     on_login_click: &mut bool,
     on_logout_click: &mut bool,
     on_clear_history: &mut bool,
     on_clear_cache: &mut bool,
+    on_check_update: &mut bool,
+    on_apply_update: &mut bool,
 ) {
     ui.vertical(|ui| {
         ui.label(
@@ -21,7 +26,7 @@ pub fn render_settings_view(
                 .color(THEME.text_white),
         );
         ui.label(
-            RichText::new("Manage Google authentication, browser cookies, and local database storage.")
+            RichText::new("Manage Google authentication, browser cookies, application updates, and local database storage.")
                 .size(12.0)
                 .color(THEME.text_muted),
         );
@@ -95,6 +100,79 @@ pub fn render_settings_view(
                     .clicked()
                 {
                     *on_login_click = true;
+                }
+            }
+        });
+
+        ui.add_space(16.0);
+
+        // Native Application Updates Group
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                RichText::new("Software Updates (GitHub Releases)")
+                    .size(14.0)
+                    .strong()
+                    .color(THEME.text_white),
+            );
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("Installed Version: v{}", env!("CARGO_PKG_VERSION")))
+                        .size(12.0)
+                        .color(THEME.text_subdued),
+                );
+
+                ui.add_space(12.0);
+
+                if is_checking_update {
+                    ui.label(
+                        RichText::new("🔄 Checking GitHub for updates...")
+                            .size(12.0)
+                            .color(THEME.text_subdued),
+                    );
+                } else if ui
+                    .button(RichText::new("🔍 Check for Updates").size(11.5))
+                    .clicked()
+                {
+                    *on_check_update = true;
+                }
+            });
+
+            if let Some(info) = update_info {
+                ui.add_space(8.0);
+                if info.is_update_available {
+                    ui.label(
+                        RichText::new(format!("🎉 New version available: v{}", info.latest_version))
+                            .size(13.0)
+                            .strong()
+                            .color(THEME.crimson),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(&info.release_notes)
+                            .size(11.0)
+                            .color(THEME.text_muted),
+                    );
+                    ui.add_space(8.0);
+                    if ui
+                        .button(
+                            RichText::new("🚀 Download & Apply Update")
+                                .size(12.0)
+                                .strong()
+                                .color(THEME.text_white),
+                        )
+                        .clicked()
+                    {
+                        *on_apply_update = true;
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("✓ RustTube is up to date.")
+                            .size(12.0)
+                            .color(THEME.text_subdued),
+                    );
                 }
             }
         });

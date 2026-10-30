@@ -41,6 +41,15 @@ pub struct ChannelItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChannelDetail {
+    pub item: ChannelItem,
+    pub uploads_playlist_id: String,
+    pub banner_url: String,
+    pub subscriber_text: String,
+    pub video_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlaylistItem {
     pub id: String,
     pub title: String,
@@ -106,10 +115,12 @@ pub enum AppPage {
     Watch(String),
     Search,
     Subscriptions,
+    Channel(String),
     Playlists,
     PlaylistDetail(String),
     WatchLater,
     History,
+    LikedVideos,
     Settings,
 }
 
@@ -119,4 +130,15 @@ pub enum AuthState {
     Authenticating,
     Authenticated { user_name: String, email: String, avatar_url: String },
     Error(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppUpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub is_update_available: bool,
+    pub release_notes: String,
+    pub download_url: String,
+    pub sha256_checksum: Option<String>,
+    pub published_at: String,
 }

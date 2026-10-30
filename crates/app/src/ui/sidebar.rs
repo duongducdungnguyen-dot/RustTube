@@ -1,17 +1,19 @@
 use crate::theme::THEME;
 use egui::{Align, Align2, Color32, Layout, RichText, Sense, Ui, Vec2};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
     Home,
     Watch,
     Subscriptions,
+    Channel(rusttube_core::models::ChannelItem),
     Playlists,
     LikedVideos,
     WatchLater,
     History,
     Settings,
 }
+
 
 pub fn render_sidebar(
     ui: &mut Ui,
@@ -46,7 +48,7 @@ pub fn render_sidebar(
         ui.add_space(20.0);
 
         // Sidebar Navigation Items
-        let nav_item = |ui: &mut Ui, label: &str, page: Page, current: Page, count: Option<usize>| -> bool {
+        let nav_item = |ui: &mut Ui, label: &str, page: &Page, current: &Page, count: Option<usize>| -> bool {
             let selected = current == page;
             let fill = if selected {
                 Color32::from_rgb(45, 12, 22)
@@ -103,22 +105,22 @@ pub fn render_sidebar(
             response.clicked()
         };
 
-        if nav_item(ui, "🏠  Home", Page::Home, *current_page, None) {
+        if nav_item(ui, "🏠  Home", &Page::Home, current_page, None) {
             *current_page = Page::Home;
         }
         ui.add_space(2.0);
 
-        if nav_item(ui, "📺  Subscriptions", Page::Subscriptions, *current_page, None) {
+        if nav_item(ui, "📺  Subscriptions", &Page::Subscriptions, current_page, None) {
             *current_page = Page::Subscriptions;
         }
         ui.add_space(2.0);
 
-        if nav_item(ui, "📁  Playlists", Page::Playlists, *current_page, None) {
+        if nav_item(ui, "📁  Playlists", &Page::Playlists, current_page, None) {
             *current_page = Page::Playlists;
         }
         ui.add_space(2.0);
 
-        if nav_item(ui, "👍  Liked Videos", Page::LikedVideos, *current_page, None) {
+        if nav_item(ui, "👍  Liked Videos", &Page::LikedVideos, current_page, None) {
             *current_page = Page::LikedVideos;
         }
         ui.add_space(2.0);
@@ -126,8 +128,8 @@ pub fn render_sidebar(
         if nav_item(
             ui,
             "⏰  Watch Later",
-            Page::WatchLater,
-            *current_page,
+            &Page::WatchLater,
+            current_page,
             Some(watch_later_count),
         ) {
             *current_page = Page::WatchLater;
@@ -137,8 +139,8 @@ pub fn render_sidebar(
         if nav_item(
             ui,
             "📜  History",
-            Page::History,
-            *current_page,
+            &Page::History,
+            current_page,
             Some(history_count),
         ) {
             *current_page = Page::History;
@@ -146,9 +148,10 @@ pub fn render_sidebar(
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
             ui.add_space(10.0);
-            if nav_item(ui, "⚙  Settings", Page::Settings, *current_page, None) {
+            if nav_item(ui, "⚙  Settings", &Page::Settings, current_page, None) {
                 *current_page = Page::Settings;
             }
         });
+
     });
 }

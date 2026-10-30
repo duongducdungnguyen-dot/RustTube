@@ -9,6 +9,7 @@ pub fn render_subscriptions_view(
     _thumbnails: &ThumbnailManager,
     is_logged_in: bool,
     on_login_click: &mut bool,
+    on_select_channel: &mut Option<ChannelItem>,
 ) {
     ui.vertical(|ui| {
         ui.label(
@@ -18,7 +19,7 @@ pub fn render_subscriptions_view(
                 .color(THEME.text_white),
         );
         ui.label(
-            RichText::new("Channels you follow on YouTube.")
+            RichText::new("Channels you follow on YouTube. Click any channel to open its dedicated page.")
                 .size(12.0)
                 .color(THEME.text_muted),
         );
@@ -74,7 +75,7 @@ pub fn render_subscriptions_view(
                         ui.end_row();
                     }
 
-                    ui.group(|ui| {
+                    let response = ui.group(|ui| {
                         ui.set_width(260.0);
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
@@ -85,13 +86,17 @@ pub fn render_subscriptions_view(
                                         .color(THEME.text_white),
                                 );
                                 ui.label(
-                                    RichText::new("Subscribed")
+                                    RichText::new("View Channel →")
                                         .size(11.0)
-                                        .color(THEME.text_muted),
+                                        .color(THEME.crimson),
                                 );
                             });
                         });
                     });
+
+                    if response.response.clicked() {
+                        *on_select_channel = Some(ch.clone());
+                    }
                 }
             });
     });

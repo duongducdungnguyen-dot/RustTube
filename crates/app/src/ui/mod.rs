@@ -1,3 +1,4 @@
+pub mod channel_view;
 pub mod header;
 pub mod history_view;
 pub mod playlists_view;
@@ -8,6 +9,7 @@ pub mod video_grid;
 pub mod watch_later_view;
 pub mod watch_view;
 
+pub use channel_view::render_channel_view;
 pub use header::render_header;
 pub use history_view::render_history_view;
 pub use playlists_view::render_playlists_view;

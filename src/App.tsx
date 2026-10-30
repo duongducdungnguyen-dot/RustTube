@@ -195,33 +195,38 @@ export default function App() {
   };
 
   // Select video for playback
-  const handleSelectVideo = async (video: VideoItem) => {
-    setSelectedVideo(video);
+  const handleSelectVideo = (video: VideoItem) => {
+    // Ensure embedUrl is always valid for instant iframe playback
+    const fullVideo = {
+      ...video,
+      embedUrl: video.embedUrl || `https://www.youtube-nocookie.com/embed/${video.id}?autoplay=1&enablejsapi=1`,
+    };
+
+    // Synchronous immediate UI state update (<10ms)
+    setSelectedVideo(fullVideo);
     setIsPlaying(true);
     setCurrentTime(0);
     setCurrentPage('watch');
 
-    // Record to history backend
-    try {
-      await fetch('/api/history', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(video),
-      });
-      fetchHistory();
-    } catch {}
+    // Record to history backend in background
+    fetch('/api/history', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(fullVideo),
+    }).then(() => fetchHistory()).catch(() => {});
 
-    // Load extra metadata
-    try {
-      const res = await fetch(`/api/video/${video.id}`);
-      if (res.ok) {
-        const data = await res.json();
-        setVideoDetail({
-          description: data.description || '',
-          availableQualities: data.availableQualities || ['1080p', '720p', '480p', '360p'],
-        });
-      }
-    } catch {}
+    // Load extra metadata asynchronously in background without blocking player
+    fetch(`/api/video/${video.id}`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data) {
+          setVideoDetail({
+            description: data.description || '',
+            availableQualities: data.availableQualities || ['1080p', '720p', '480p', '360p'],
+          });
+        }
+      })
+      .catch(() => {});
   };
 
   // Toggle watch later
@@ -403,8 +408,23 @@ export default function App() {
             </form>
           </div>
 
-          {/* Account Indicator */}
+          {/* Account Indicator & Quick Stop Controls */}
           <div className="flex items-center gap-3">
+            {selectedVideo && (
+              <button
+                onClick={() => {
+                  setSelectedVideo(null);
+                  setIsPlaying(false);
+                  showNotification('Đã tắt video và âm thanh');
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-[#ff0033]/20 hover:bg-[#ff0033]/40 border border-[#ff0033]/50 text-[#ff4d6d] hover:text-white text-xs font-semibold rounded-md transition-colors shadow-sm"
+                title="Dừng phát video và tắt toàn bộ âm thanh nền"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span className="hidden md:inline">Tắt Audio / Stop</span>
+              </button>
+            )}
+
             {auth.isLoggedIn ? (
               <div className="flex items-center gap-2 cursor-pointer" onClick={() => setCurrentPage('settings')}>
                 <div className="w-7 h-7 rounded-full bg-[#202334] border border-[#30344c] overflow-hidden flex items-center justify-center">
@@ -968,11 +988,16 @@ export default function App() {
                     <span>Watch View</span>
                   </button>
                   <button
-                    onClick={() => setSelectedVideo(null)}
-                    title="Close player"
-                    className="p-1.5 text-[#7b8094] hover:text-white hover:bg-[#1a1c26] rounded-md transition-colors"
+                    onClick={() => {
+                      setSelectedVideo(null);
+                      setIsPlaying(false);
+                      showNotification('Đã tắt video và âm thanh');
+                    }}
+                    title="Stop player and turn off audio completely"
+                    className="flex items-center gap-1 px-2.5 py-1.5 bg-[#ff0033]/20 hover:bg-[#ff0033]/40 border border-[#ff0033]/50 text-[#ff4d6d] hover:text-white rounded-md text-xs font-medium transition-colors"
                   >
-                    <X className="w-4 h-4" />
+                    <X className="w-3.5 h-3.5" />
+                    <span>Tắt Player</span>
                   </button>
                 </div>
               </div>

@@ -2,6 +2,8 @@ mod app;
 mod cache;
 mod theme;
 mod ui;
+mod updater;
+
 
 use anyhow::Result;
 use app::RustTubeApp;

@@ -16,6 +16,7 @@ pub fn render_playlists_view(
     new_playlist_title: &mut String,
     _new_playlist_desc: &mut String,
     on_create_playlist: &mut bool,
+    on_delete_playlist: &mut Option<String>,
 ) {
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
@@ -85,6 +86,12 @@ pub fn render_playlists_view(
                         .strong()
                         .color(THEME.text_white),
                 );
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(RichText::new("🗑 Delete Playlist").size(11.0).color(THEME.crimson)).clicked() {
+                        *on_delete_playlist = Some(pl.id.clone());
+                    }
+                });
             });
 
             ui.add_space(12.0);

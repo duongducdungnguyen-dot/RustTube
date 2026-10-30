@@ -1,19 +1,23 @@
 use crate::cache::ThumbnailManager;
 use crate::theme::{configure_theme, THEME};
 use crate::ui::{
-    render_header, render_history_view, render_playlists_view, render_settings_view,
-    render_sidebar, render_subscriptions_view, render_video_grid, render_watch_later_view,
-    render_watch_view, Page,
+    render_channel_view, render_header, render_history_view, render_playlists_view,
+    render_settings_view, render_sidebar, render_subscriptions_view, render_video_grid,
+    render_watch_later_view, render_watch_view, Page,
 };
+use crate::updater;
 use eframe::App;
 use egui::{CentralPanel, Context, SidePanel, TopBottomPanel};
 use rusttube_api::YouTubeApiClient;
 use rusttube_auth::{GoogleAuthManager, GoogleUserInfo};
 use rusttube_core::events::UiCommand;
-use rusttube_core::models::{ChannelItem, PlaybackStatus, PlaylistItem, VideoItem};
+use rusttube_core::models::{
+    AppUpdateInfo, ChannelDetail, ChannelItem, PlaybackStatus, PlaylistItem, VideoItem,
+};
 use rusttube_player::PlayerController;
 use rusttube_storage::{Database, HistoryRepository, SyncRepository, WatchLaterRepository};
 use rusttube_ytdlp::YtDlpWrapper;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -30,6 +34,12 @@ pub enum WorkerEvent {
     SyncFinished,
     _PlaybackStatusUpdated(PlaybackStatus),
     VideoDetailLoaded { description: String },
+    ChannelDetailLoaded(ChannelDetail),
+    ChannelVideosLoaded(Vec<VideoItem>),
+    UpdateCheckFinished(Option<AppUpdateInfo>),
+    UpdateDownloaded(PathBuf),
+    PlaylistCreated(PlaylistItem),
+    PlaylistDeleted(String),
     StatusMessage(String),
 }
 
@@ -66,6 +76,15 @@ pub struct RustTubeApp {
     selected_video: Option<VideoItem>,
     video_description: String,
     playback_status: PlaybackStatus,
+
+    // Channel Detail State
+    selected_channel_detail: Option<ChannelDetail>,
+    channel_videos: Vec<VideoItem>,
+
+    // Software Updates
+    update_info: Option<AppUpdateInfo>,
+    is_checking_update: bool,
+    staged_update_path: Option<PathBuf>,
 
     // Auth
     user_info: Option<GoogleUserInfo>,
@@ -138,6 +157,13 @@ impl RustTubeApp {
             video_description: String::new(),
             playback_status: PlaybackStatus::default(),
 
+            selected_channel_detail: None,
+            channel_videos: Vec::new(),
+
+            update_info: None,
+            is_checking_update: false,
+            staged_update_path: None,
+
             user_info: None,
             is_authenticating: false,
 
@@ -152,6 +178,7 @@ impl RustTubeApp {
 
         app.trigger_feed_fetch();
         app.trigger_session_restore();
+        app.trigger_check_update();
 
         app
     }
@@ -281,6 +308,63 @@ impl RustTubeApp {
         });
     }
 
+    fn trigger_load_channel(&self, channel_id: String) {
+        let tx = self.worker_tx.clone();
+        let api = self.api_client.clone();
+        let ytdlp = self.ytdlp.clone();
+        let auth = self.auth_manager.clone();
+
+        tokio::spawn(async move {
+            let token = auth.get_access_token().await.ok().flatten();
+
+            if let Some(tok) = token {
+                if let Ok(detail) = api.get_channel_detail(&tok, &channel_id).await {
+                    let _ = tx.send(WorkerEvent::ChannelDetailLoaded(detail)).await;
+                }
+            }
+
+            // Fallback / Fetch channel videos using yt-dlp search query
+            let search_term = format!("channel:{}", channel_id);
+            if let Ok(videos) = ytdlp.search_videos(&search_term, 20).await {
+                let _ = tx.send(WorkerEvent::ChannelVideosLoaded(videos)).await;
+            }
+        });
+    }
+
+    fn trigger_check_update(&self) {
+        let tx = self.worker_tx.clone();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            if let Ok(update_opt) = updater::check_for_updates(&client).await {
+                let _ = tx.send(WorkerEvent::UpdateCheckFinished(update_opt)).await;
+            }
+        });
+    }
+
+    fn trigger_download_and_apply_update(&self, download_url: String) {
+        let tx = self.worker_tx.clone();
+        tokio::spawn(async move {
+            let _ = tx
+                .send(WorkerEvent::StatusMessage("Downloading software update...".to_string()))
+                .await;
+
+            let client = reqwest::Client::new();
+            match updater::download_and_stage_update(&client, &download_url).await {
+                Ok(path) => {
+                    let _ = tx
+                        .send(WorkerEvent::StatusMessage("Update ready to install.".to_string()))
+                        .await;
+                    let _ = tx.send(WorkerEvent::UpdateDownloaded(path)).await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(WorkerEvent::StatusMessage(format!("Update download failed: {}", e)))
+                        .await;
+                }
+            }
+        });
+    }
+
     fn trigger_sync(&self) {
         let tx = self.worker_tx.clone();
         let auth = self.auth_manager.clone();
@@ -374,6 +458,31 @@ impl RustTubeApp {
                 }
                 WorkerEvent::VideoDetailLoaded { description } => {
                     self.video_description = description;
+                }
+                WorkerEvent::ChannelDetailLoaded(detail) => {
+                    self.selected_channel_detail = Some(detail);
+                }
+                WorkerEvent::ChannelVideosLoaded(videos) => {
+                    self.channel_videos = videos;
+                }
+                WorkerEvent::UpdateCheckFinished(opt) => {
+                    self.is_checking_update = false;
+                    self.update_info = opt;
+                }
+                WorkerEvent::UpdateDownloaded(path) => {
+                    self.staged_update_path = Some(path);
+                }
+                WorkerEvent::PlaylistCreated(pl) => {
+                    self.playlists.push(pl);
+                    self.status_message = "Playlist created successfully.".to_string();
+                }
+                WorkerEvent::PlaylistDeleted(id) => {
+                    self.playlists.retain(|p| p.id != id);
+                    if self.selected_playlist.as_ref().map(|p| &p.id) == Some(&id) {
+                        self.selected_playlist = None;
+                        self.playlist_items.clear();
+                    }
+                    self.status_message = "Playlist deleted.".to_string();
                 }
                 WorkerEvent::StatusMessage(msg) => {
                     self.status_message = msg;
@@ -558,16 +667,49 @@ impl App for RustTubeApp {
                     }
                     Page::Subscriptions => {
                         let mut on_login_click = false;
+                        let mut on_select_channel: Option<ChannelItem> = None;
+
                         render_subscriptions_view(
                             ui,
                             &self.subscriptions,
                             &self.thumbnails,
                             self.user_info.is_some(),
                             &mut on_login_click,
+                            &mut on_select_channel,
                         );
+
                         if on_login_click {
                             self.is_authenticating = true;
                             self.trigger_google_login();
+                        }
+
+                        if let Some(ch) = on_select_channel {
+                            self.current_page = Page::Channel(ch.clone());
+                            self.trigger_load_channel(ch.id);
+                        }
+                    }
+                    Page::Channel(ref ch) => {
+                        let mut on_back = false;
+                        let mut on_toggle_sub = false;
+
+                        let is_subbed = self.subscriptions.iter().any(|s| s.id == ch.id);
+
+                        render_channel_view(
+                            ui,
+                            &self.selected_channel_detail,
+                            &self.channel_videos,
+                            &self.thumbnails,
+                            &watch_later_ids,
+                            is_subbed,
+                            self.user_info.is_some(),
+                            &mut on_back,
+                            &mut on_toggle_sub,
+                            &mut on_select_video,
+                            &mut on_toggle_watch_later,
+                        );
+
+                        if on_back {
+                            self.current_page = Page::Subscriptions;
                         }
                     }
                     Page::Playlists => {
@@ -643,6 +785,8 @@ impl App for RustTubeApp {
                         let mut on_logout_click = false;
                         let mut on_clear_history = false;
                         let mut on_clear_cache = false;
+                        let mut on_check_update = false;
+                        let mut on_apply_update = false;
 
                         render_settings_view(
                             ui,
@@ -650,10 +794,14 @@ impl App for RustTubeApp {
                             self.is_authenticating,
                             &mut self.cookies_browser,
                             &mut self.hwdec_setting,
+                            self.update_info.as_ref(),
+                            self.is_checking_update,
                             &mut on_login_click,
                             &mut on_logout_click,
                             &mut on_clear_history,
                             &mut on_clear_cache,
+                            &mut on_check_update,
+                            &mut on_apply_update,
                         );
 
                         if on_login_click {
@@ -668,6 +816,19 @@ impl App for RustTubeApp {
                         if on_clear_history {
                             let _ = self.history_repo.clear();
                             self.history_videos.clear();
+                        }
+
+                        if on_check_update {
+                            self.is_checking_update = true;
+                            self.trigger_check_update();
+                        }
+
+                        if on_apply_update {
+                            if let Some(ref path) = self.staged_update_path {
+                                let _ = updater::launch_updater_helper(path);
+                            } else if let Some(ref info) = self.update_info {
+                                self.trigger_download_and_apply_update(info.download_url.clone());
+                            }
                         }
                     }
                 }
