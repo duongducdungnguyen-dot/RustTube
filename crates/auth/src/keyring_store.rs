@@ -1,84 +1,78 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use keyring::Entry;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
-pub trait TokenStorage: Send + Sync {
-    fn save_refresh_token(&self, token: &str) -> Result<()>;
-    fn get_refresh_token(&self) -> Result<Option<String>>;
-    fn delete_refresh_token(&self) -> Result<()>;
+const DEFAULT_USERNAME: &str = "personal_youtube_account";
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct StoredTokenSet {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at_unix: i64,
+    pub scope: String,
 }
 
-pub struct SecureTokenStore {
+// Redact sensitive tokens from Debug output so tokens are never exposed in logs
+impl fmt::Debug for StoredTokenSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredTokenSet")
+            .field("access_token", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("expires_at_unix", &self.expires_at_unix)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+impl StoredTokenSet {
+    pub fn is_expired(&self, now_unix: i64) -> bool {
+        // Refresh 60 seconds prior to actual expiration
+        now_unix + 60 >= self.expires_at_unix
+    }
+}
+
+#[derive(Clone)]
+pub struct KeyringTokenStore {
     service_name: String,
-    account_name: String,
 }
 
-impl SecureTokenStore {
-    pub fn new(service_name: &str, account_name: &str) -> Self {
+impl KeyringTokenStore {
+    pub fn new(service_name: impl Into<String>) -> Self {
         Self {
-            service_name: service_name.to_string(),
-            account_name: account_name.to_string(),
+            service_name: service_name.into(),
         }
     }
-}
 
-impl TokenStorage for SecureTokenStore {
-    fn save_refresh_token(&self, token: &str) -> Result<()> {
-        let entry = Entry::new(&self.service_name, &self.account_name)?;
-        entry.set_password(token)?;
+    pub fn save_tokens(&self, tokens: &StoredTokenSet) -> Result<()> {
+        let entry = Entry::new(&self.service_name, DEFAULT_USERNAME)
+            .context("Failed to initialize Windows Credential Manager entry")?;
+        let payload = serde_json::to_string(tokens)?;
+        entry
+            .set_password(&payload)
+            .context("Failed to store OAuth tokens in Windows Credential Manager")?;
         Ok(())
     }
 
-    fn get_refresh_token(&self) -> Result<Option<String>> {
-        let entry = Entry::new(&self.service_name, &self.account_name)?;
+    pub fn load_tokens(&self) -> Result<Option<StoredTokenSet>> {
+        let entry = Entry::new(&self.service_name, DEFAULT_USERNAME)
+            .context("Failed to open Windows Credential Manager entry")?;
         match entry.get_password() {
-            Ok(pw) => Ok(Some(pw)),
+            Ok(raw) => {
+                let parsed: StoredTokenSet = serde_json::from_str(&raw)
+                    .context("Stored credential JSON in keyring is malformed")?;
+                Ok(Some(parsed))
+            }
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Keyring error: {}", e)),
+            Err(e) => Err(anyhow::anyhow!("Keyring read error: {}", e)),
         }
     }
 
-    fn delete_refresh_token(&self) -> Result<()> {
-        let entry = Entry::new(&self.service_name, &self.account_name)?;
-        match entry.delete_password() {
-            Ok(_) => Ok(()),
-            Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(anyhow::anyhow!("Keyring delete error: {}", e)),
+    pub fn clear_tokens(&self) -> Result<()> {
+        let entry = Entry::new(&self.service_name, DEFAULT_USERNAME)?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(anyhow::anyhow!("Failed to clear keyring credential: {}", e)),
         }
-    }
-}
-
-#[derive(Default)]
-pub struct MemoryTokenStore {
-    token: std::sync::RwLock<Option<String>>,
-}
-
-impl MemoryTokenStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_token(token: &str) -> Self {
-        Self {
-            token: std::sync::RwLock::new(Some(token.to_string())),
-        }
-    }
-}
-
-impl TokenStorage for MemoryTokenStore {
-    fn save_refresh_token(&self, token: &str) -> Result<()> {
-        let mut lock = self.token.write().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        *lock = Some(token.to_string());
-        Ok(())
-    }
-
-    fn get_refresh_token(&self) -> Result<Option<String>> {
-        let lock = self.token.read().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        Ok(lock.clone())
-    }
-
-    fn delete_refresh_token(&self) -> Result<()> {
-        let mut lock = self.token.write().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        *lock = None;
-        Ok(())
     }
 }

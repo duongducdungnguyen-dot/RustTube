@@ -1,18 +1,11 @@
-# Third-Party Dependencies and Licenses
+# Third-Party Licenses & Notices
 
-RustTube links against and uses the following open-source libraries and utilities:
+RustTube integrates with the following open-source libraries and external tools:
 
-### Direct Crates
-- **slint** (GPLv3 / Royalty-Free Desktop / Commercial): Modern GUI toolkit compiled directly to native graphics.
-- **tokio** (MIT): Asynchronous runtime for I/O, subprocesses, and background task scheduling.
-- **serde / serde_json** (MIT / Apache-2.0): High-speed JSON serialization and deserialization.
-- **reqwest** (MIT / Apache-2.0): Async HTTP client with rustls TLS engine.
-- **oauth2** (MIT / Apache-2.0): Standards-compliant OAuth 2.0 PKCE client.
-- **keyring** (MIT / Apache-2.0): Secure credential storage integrating with Windows Credential Manager.
-- **image** (MIT / Apache-2.0): Image decoding engine for thumbnail rasterization.
-- **windows-sys** (MIT / Apache-2.0): Direct raw Win32 bindings for window handle and render surface integration.
-- **libloading** (ISC): Dynamic library symbol loader for libmpv.
-
-### External Binaries & Runtime Libraries
-- **yt-dlp** (The Unlicense): Command-line audio/video extraction tool.
-- **libmpv** (LGPLv2.1+ / GPLv2+): Media player core library providing hardware-accelerated video decoding via DirectX / Direct3D / OpenGL.
+1. **eframe / egui** — MIT / Apache-2.0 License
+2. **Tokio** — MIT License
+3. **rusqlite / SQLite** — MIT License / Public Domain
+4. **reqwest** — MIT / Apache-2.0 License
+5. **keyring-rs** — MIT / Apache-2.0 License
+6. **yt-dlp** — The Unlicense (executed as external subprocess)
+7. **libmpv** — GPLv2+ / LGPLv2.1+ (dynamically loaded shared library)

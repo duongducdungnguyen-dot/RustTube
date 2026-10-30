@@ -1,80 +1,41 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod cache;
 mod theme;
 mod ui;
-mod updater;
-
 
 use anyhow::Result;
 use app::RustTubeApp;
-use eframe::NativeOptions;
-use rusttube_api::YouTubeApiClient;
-use rusttube_auth::GoogleAuthManager;
 use rusttube_core::AppConfig;
-use rusttube_player::PlayerController;
-use rusttube_storage::Database;
-use rusttube_ytdlp::YtDlpWrapper;
-use std::sync::Arc;
-use tracing::info;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    info!("Starting RustTube native Windows desktop application...");
+    tracing_subscriber::fmt()
+        .with_env_filter("info,rusttube=debug")
+        .init();
 
+    let config = AppConfig::load().unwrap_or_default();
     let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
         .enable_all()
         .build()?;
 
-    let _guard = rt.enter();
-
-    let config = AppConfig::load_or_default("config.toml");
-    let db = Database::new("cache/rusttube.db")?;
-
-    let auth_manager = Arc::new(GoogleAuthManager::new(
-        &config.auth.google_client_id,
-        config.auth.redirect_port,
-        &config.auth.keyring_service_name,
-    ));
-
-    let api_client = Arc::new(YouTubeApiClient::new());
-    let ytdlp = Arc::new(YtDlpWrapper::new(
-        &config.ytdlp.binary_path,
-        &config.ytdlp.cookies_browser,
-    ));
-
-    let player = Arc::new(tokio::sync::Mutex::new(PlayerController::new(
-        &config.player.hwdec,
-    )));
-
-    {
-        let mut p = rt.block_on(player.lock());
-        if let Err(e) = p.initialize() {
-            tracing::warn!("libmpv player initialization notice: {}", e);
-        }
-    }
-
-    let options = NativeOptions {
+    let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("RustTube")
-            .with_inner_size([1380.0, 860.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_inner_size([1360.0, 840.0])
+            .with_min_inner_size([960.0, 620.0]),
         ..Default::default()
     };
 
     eframe::run_native(
         "RustTube",
-        options,
+        native_options,
         Box::new(move |cc| {
-            Ok(Box::new(RustTubeApp::new(
-                cc,
-                db,
-                auth_manager,
-                api_client,
-                ytdlp,
-                player,
-            )))
+            theme::apply_obsidian_theme(&cc.egui_ctx);
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(RustTubeApp::new(config, rt.handle().clone())))
         }),
-    ).map_err(|e| anyhow::anyhow!("eframe application error: {}", e))?;
-
-    Ok(())
+    )
+    .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
 }

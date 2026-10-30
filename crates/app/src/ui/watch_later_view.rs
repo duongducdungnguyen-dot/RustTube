@@ -1,59 +1,61 @@
-use crate::cache::ThumbnailManager;
-use crate::theme::THEME;
-use egui::{RichText, Ui};
-use rusttube_core::models::VideoItem;
+use crate::ui::ActivePage;
+use egui::Ui;
+use rusttube_core::{UiCommand, WatchLaterEntry};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub fn render_watch_later_view(
     ui: &mut Ui,
-    items: &[VideoItem],
-    thumbnails: &ThumbnailManager,
-    watch_later_ids: &[String],
-    on_select_video: &mut Option<VideoItem>,
-    on_toggle_watch_later: &mut Option<VideoItem>,
+    local_entries: &[WatchLaterEntry],
+    experimental_entries: &[WatchLaterEntry],
+    experimental_enabled: bool,
+    current_page: &mut ActivePage,
+    cmd_tx: &UnboundedSender<UiCommand>,
 ) {
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Watch Later")
-                    .size(18.0)
-                    .strong()
-                    .color(THEME.text_white),
-            );
+    ui.heading(format!("A. RustTube Local Watch Later ({})", local_entries.len()));
+    ui.label("Stored persistently in your local SQLite database. Never overwritten by remote changes.");
+    ui.separator();
 
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(format!("({} videos)", items.len()))
-                    .size(12.0)
-                    .color(THEME.text_muted),
-            );
-        });
-
-        ui.add_space(16.0);
-
-        if items.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.label(
-                    RichText::new("No videos saved in Watch Later.")
-                        .size(13.0)
-                        .color(THEME.text_subdued),
-                );
-                ui.label(
-                    RichText::new("Click the bookmark icon on any video card to save it for later.")
-                        .size(11.0)
-                        .color(THEME.text_muted),
-                );
+    if local_entries.is_empty() {
+        ui.label("No videos saved in your local RustTube Watch Later queue.");
+    } else {
+        for entry in local_entries {
+            ui.horizontal(|ui| {
+                if ui.button(format!("▶ {}", entry.video.title)).clicked() {
+                    *current_page = ActivePage::Watch;
+                    let _ = cmd_tx.send(UiCommand::PlayVideo {
+                        video: entry.video.clone(),
+                        playlist_queue: None,
+                        resume_from_seconds: None,
+                    });
+                }
+                ui.label(&entry.video.channel_name);
+                if ui.small_button("Remove").clicked() {
+                    let _ = cmd_tx.send(UiCommand::RemoveWatchLater {
+                        video_id: entry.video.id.clone(),
+                    });
+                }
             });
-            return;
         }
+    }
 
-        crate::ui::video_grid::render_video_grid(
-            ui,
-            items,
-            thumbnails,
-            watch_later_ids,
-            on_select_video,
-            on_toggle_watch_later,
-        );
-    });
+    ui.add_space(20.0);
+    ui.heading("B. YouTube Watch Later (Unofficial / Cookie-Based)");
+    ui.label("Note: YouTube's official Data API v3 restricts access to the Watch Later (WL) playlist. Optional extraction uses yt-dlp with your local browser cookies and never overwrites your RustTube local queue.");
+    if experimental_enabled && ui.button("Fetch via Browser Cookies (Experimental)").clicked() {
+        let _ = cmd_tx.send(UiCommand::ImportExperimentalYouTubeWatchLater);
+    }
+
+    for entry in experimental_entries {
+        ui.horizontal(|ui| {
+            if ui.button(format!("▶ {}", entry.video.title)).clicked() {
+                *current_page = ActivePage::Watch;
+                let _ = cmd_tx.send(UiCommand::PlayVideo {
+                    video: entry.video.clone(),
+                    playlist_queue: None,
+                    resume_from_seconds: None,
+                });
+            }
+            ui.label(&entry.video.channel_name);
+        });
+    }
 }

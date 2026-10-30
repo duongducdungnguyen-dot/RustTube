@@ -1,103 +1,96 @@
-use crate::cache::ThumbnailManager;
-use crate::theme::THEME;
-use egui::{RichText, Ui, Vec2};
-use rusttube_core::models::ChannelItem;
+use crate::ui::ActivePage;
+use egui::Ui;
+use rusttube_core::{ChannelItem, UiCommand};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub fn render_subscriptions_view(
     ui: &mut Ui,
     channels: &[ChannelItem],
-    _thumbnails: &ThumbnailManager,
-    is_logged_in: bool,
-    on_login_click: &mut bool,
-    on_select_channel: &mut Option<ChannelItem>,
+    filter_query: &mut String,
+    confirm_unsub_channel_id: &mut Option<String>,
+    is_loading: bool,
+    current_page: &mut ActivePage,
+    cmd_tx: &UnboundedSender<UiCommand>,
 ) {
-    ui.vertical(|ui| {
-        ui.label(
-            RichText::new("Subscribed Channels")
-                .size(18.0)
-                .strong()
-                .color(THEME.text_white),
+    ui.horizontal(|ui| {
+        ui.heading(format!("Subscribed Channels ({})", channels.len()));
+        ui.add(
+            egui::TextEdit::singleline(filter_query)
+                .hint_text("Filter channels by name or description...")
+                .desired_width(240.0),
         );
-        ui.label(
-            RichText::new("Channels you follow on YouTube. Click any channel to open its dedicated page.")
-                .size(12.0)
-                .color(THEME.text_muted),
-        );
-
-        ui.add_space(16.0);
-
-        if !is_logged_in {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.label(
-                    RichText::new("Sign in with Google to sync your YouTube channel subscriptions.")
-                        .size(13.0)
-                        .color(THEME.text_subdued),
-                );
-                ui.add_space(12.0);
-                if ui
-                    .button(
-                        RichText::new("Sign In with Google")
-                            .size(12.0)
-                            .strong()
-                            .color(THEME.text_white),
-                    )
-                    .clicked()
-                {
-                    *on_login_click = true;
-                }
+        if ui
+            .add_enabled(!is_loading, egui::Button::new("Refresh Subscriptions"))
+            .clicked()
+        {
+            let _ = cmd_tx.send(UiCommand::LoadSubscriptions {
+                force_refresh: true,
             });
-            return;
         }
+    });
 
-        if channels.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.label(
-                    RichText::new("No subscriptions found in local database.")
-                        .size(13.0)
-                        .color(THEME.text_subdued),
-                );
-                ui.label(
-                    RichText::new("Click 'Sync' in the top header bar to fetch your latest YouTube subscriptions.")
-                        .size(11.0)
-                        .color(THEME.text_muted),
-                );
-            });
-            return;
-        }
+    ui.separator();
 
-        egui::Grid::new("subscriptions_grid")
-            .spacing(Vec2::new(16.0, 16.0))
-            .show(ui, |ui| {
-                for (idx, ch) in channels.iter().enumerate() {
-                    if idx > 0 && idx % 3 == 0 {
-                        ui.end_row();
-                    }
+    let query_lower = filter_query.trim().to_lowercase();
+    let filtered: Vec<&ChannelItem> = channels
+        .iter()
+        .filter(|c| {
+            query_lower.is_empty()
+                || c.title.to_lowercase().contains(&query_lower)
+                || c.description.to_lowercase().contains(&query_lower)
+        })
+        .collect();
 
-                    let response = ui.group(|ui| {
-                        ui.set_width(260.0);
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(
-                                    RichText::new(&ch.title)
-                                        .size(13.0)
-                                        .strong()
-                                        .color(THEME.text_white),
-                                );
-                                ui.label(
-                                    RichText::new("View Channel →")
-                                        .size(11.0)
-                                        .color(THEME.crimson),
-                                );
+    if filtered.is_empty() {
+        ui.label("No subscribed channels match your filter.");
+        return;
+    }
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for ch in filtered {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        if ui.button(format!("📺 {}", ch.title)).clicked() {
+                            *current_page = ActivePage::Channel;
+                            let _ = cmd_tx.send(UiCommand::OpenChannel {
+                                channel_id: ch.channel_id.clone(),
+                                page_token: None,
                             });
-                        });
+                        }
+                        if !ch.description.is_empty() {
+                            ui.label(&ch.description);
+                        }
                     });
 
-                    if response.response.clicked() {
-                        *on_select_channel = Some(ch.clone());
-                    }
-                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(ref sub_id) = ch.subscription_id {
+                            if confirm_unsub_channel_id.as_deref() == Some(&ch.channel_id) {
+                                if ui.button("Confirm Unsubscribe").clicked() {
+                                    let _ = cmd_tx.send(UiCommand::UnsubscribeChannel {
+                                        channel_id: ch.channel_id.clone(),
+                                        subscription_id: sub_id.clone(),
+                                    });
+                                    *confirm_unsub_channel_id = None;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    *confirm_unsub_channel_id = None;
+                                }
+                            } else if ui.button("Unsubscribe").clicked() {
+                                *confirm_unsub_channel_id = Some(ch.channel_id.clone());
+                            }
+                        }
+
+                        if ui.button("Open Channel").clicked() {
+                            *current_page = ActivePage::Channel;
+                            let _ = cmd_tx.send(UiCommand::OpenChannel {
+                                channel_id: ch.channel_id.clone(),
+                                page_token: None,
+                            });
+                        }
+                    });
+                });
             });
+        }
     });
 }

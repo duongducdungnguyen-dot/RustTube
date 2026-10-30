@@ -1,0 +1,72 @@
+name: Release Windows x64
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable-x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run formatting, check, and test suite
+        run: |
+          cargo fmt --check
+          cargo check --workspace
+          cargo test --workspace
+
+      - name: Build release binaries (rusttube.exe & rusttube-updater.exe)
+        run: cargo build --release --workspace
+
+      - name: Package Windows x64 Release Archive & Manifest
+        shell: pwsh
+        run: |
+          $Version = "${{ github.ref_name }}".TrimStart('v')
+          if (-not $Version) { $Version = "0.2.0" }
+          $StageDir = "dist/RustTube-win-x64"
+          New-Item -ItemType Directory -Path "$StageDir/bin" -Force | Out-Null
+          Copy-Item "target/release/rusttube.exe" "$StageDir/rusttube.exe"
+          Copy-Item "target/release/rusttube-updater.exe" "$StageDir/rusttube-updater.exe"
+          Copy-Item "config.example.toml" "$StageDir/config.example.toml"
+          Copy-Item "README.md" "$StageDir/README.md"
+
+          $ZipName = "RustTube-v$Version-windows-x64.zip"
+          Compress-Archive -Path "$StageDir/*" -DestinationPath "dist/$ZipName"
+          $Hash = (Get-FileHash "dist/$ZipName" -Algorithm SHA256).Hash.ToLower()
+          "$Hash  $ZipName" | Out-File -FilePath "dist/$ZipName.sha256" -Encoding utf8
+
+          $Manifest = @{
+            version = $Version
+            published_at = (Get-Date).ToUniversalTime().ToString("o")
+            platform = "windows-x64"
+            asset_name = $ZipName
+            sha256 = $Hash
+            min_updater_version = "0.1.0"
+            preserves_user_data = $true
+          } | ConvertTo-Json -Depth 4
+          $Manifest | Out-File -FilePath "dist/release-manifest.json" -Encoding utf8
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.sha256
+            dist/release-manifest.json
+          generate_release_notes: true

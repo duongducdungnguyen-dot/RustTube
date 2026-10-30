@@ -1,110 +1,75 @@
-use crate::theme::THEME;
-use egui::{RichText, TextEdit, Ui};
-use rusttube_auth::GoogleUserInfo;
+use crate::ui::ActivePage;
+use egui::Ui;
+use rusttube_core::{SyncState, UiCommand, UpdateState, UserProfile};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub fn render_header(
     ui: &mut Ui,
     search_query: &mut String,
-    on_search: &mut bool,
-    user_info: Option<&GoogleUserInfo>,
-    is_authenticating: bool,
-    on_login_click: &mut bool,
-    is_syncing: bool,
-    last_sync_text: &str,
-    on_sync_click: &mut bool,
+    profile: &Option<UserProfile>,
+    sync_state: &SyncState,
+    update_state: &UpdateState,
+    can_go_back: bool,
+    on_back: &mut bool,
+    current_page: &mut ActivePage,
+    cmd_tx: &UnboundedSender<UiCommand>,
 ) {
     ui.horizontal(|ui| {
-        ui.add_space(8.0);
-
-        // Search Input Box
-        let text_edit = TextEdit::singleline(search_query)
-            .hint_text("Search videos or paste YouTube URL...")
-            .desired_width(480.0);
-        let response = ui.add(text_edit);
-
-        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            *on_search = true;
-        }
-
         if ui
-            .button(RichText::new("🔍 Search").size(12.0).strong())
+            .add_enabled(can_go_back, egui::Button::new("← Back"))
             .clicked()
         {
-            *on_search = true;
+            *on_back = true;
         }
 
-        if !search_query.is_empty() {
-            if ui.button("✕").clicked() {
-                search_query.clear();
-                *on_search = true;
+        if ui.button("RustTube").clicked() {
+            *current_page = ActivePage::Home;
+            let _ = cmd_tx.send(UiCommand::LoadHomeFeed {
+                category: rusttube_core::FeedCategory::Personalized,
+                force_refresh: false,
+            });
+        }
+
+        ui.separator();
+
+        let response = ui.add(
+            egui::TextEdit::singleline(search_query)
+                .hint_text("Search videos, channels, or paste YouTube link...")
+                .desired_width(360.0),
+        );
+
+        if (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            || ui.button("Search").clicked()
+        {
+            let q = search_query.trim().to_string();
+            if !q.is_empty() {
+                *current_page = ActivePage::Search;
+                let _ = cmd_tx.send(UiCommand::Search { query: q });
+            }
+        }
+
+        if let UpdateState::UpdateAvailable { manifest, .. } = update_state {
+            if ui
+                .button(format!("Update v{} Available", manifest.version))
+                .clicked()
+            {
+                *current_page = ActivePage::Settings;
             }
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.add_space(8.0);
-
-            // Account Pill / Login Button
-            if let Some(user) = user_info {
-                let label_text = if user.name.is_empty() {
-                    &user.email
-                } else {
-                    &user.name
-                };
-                ui.menu_button(
-                    RichText::new(format!("👤 {}", label_text))
-                        .size(12.0)
-                        .strong()
-                        .color(THEME.text_white),
-                    |ui| {
-                        ui.label(RichText::new(&user.email).size(11.0).color(THEME.text_muted));
-                        ui.separator();
-                        if ui.button("⚙ Account Settings").clicked() {
-                            ui.close_menu();
-                        }
-                    },
-                );
-            } else if is_authenticating {
-                ui.label(
-                    RichText::new("⏳ Authenticating...")
-                        .size(12.0)
-                        .color(THEME.text_subdued),
-                );
-            } else if ui
-                .button(
-                    RichText::new("Sign In with Google")
-                        .size(12.0)
-                        .strong()
-                        .color(THEME.text_white),
-                )
-                .clicked()
-            {
-                *on_login_click = true;
-            }
-
-            ui.add_space(12.0);
-
-            // Sync Indicator
-            if is_syncing {
-                ui.label(
-                    RichText::new("🔄 Syncing...")
-                        .size(11.0)
-                        .color(THEME.text_subdued),
-                );
-            } else {
-                if !last_sync_text.is_empty() {
-                    ui.label(
-                        RichText::new(format!("Synced {}", last_sync_text))
-                            .size(11.0)
-                            .color(THEME.text_muted),
-                    );
+            if let Some(user) = profile {
+                if ui.button(&user.display_name).clicked() {
+                    *current_page = ActivePage::Settings;
                 }
                 if ui
-                    .button(RichText::new("🔄 Sync").size(11.0))
-                    .on_hover_text("Synchronize YouTube account data with local cache")
+                    .add_enabled(!sync_state.is_syncing, egui::Button::new("Sync Account"))
                     .clicked()
                 {
-                    *on_sync_click = true;
+                    let _ = cmd_tx.send(UiCommand::TriggerAccountSync);
                 }
+            } else if ui.button("Sign In with Google").clicked() {
+                let _ = cmd_tx.send(UiCommand::StartGoogleLogin);
             }
         });
     });

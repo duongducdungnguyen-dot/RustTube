@@ -1,87 +1,113 @@
-use crate::models::YouTubeUrlType;
 use url::Url;
 
-pub struct YouTubeUrlParser;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedYouTubeInput {
+    Video(String),
+    Shorts(String),
+    Playlist(String),
+    Channel(String),
+    Search(String),
+}
 
-impl YouTubeUrlParser {
-    pub fn is_valid_video_id(id: &str) -> bool {
-        id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+pub fn parse_youtube_input(input: &str) -> ParsedYouTubeInput {
+    let trimmed = input.trim();
+    if is_valid_video_id(trimmed) {
+        return ParsedYouTubeInput::Video(trimmed.to_string());
     }
 
-    pub fn parse(input: &str) -> YouTubeUrlType {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return YouTubeUrlType::Invalid;
-        }
+    let candidate = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        trimmed.to_string()
+    } else if trimmed.starts_with("youtube.com/")
+        || trimmed.starts_with("www.youtube.com/")
+        || trimmed.starts_with("youtu.be/")
+    {
+        format!("https://{}", trimmed)
+    } else {
+        return ParsedYouTubeInput::Search(trimmed.to_string());
+    };
 
-        if Self::is_valid_video_id(trimmed) {
-            return YouTubeUrlType::Video(trimmed.to_string());
-        }
-
-        let parsed_url = match Url::parse(trimmed) {
-            Ok(u) => u,
-            Err(_) => {
-                if let Ok(u) = Url::parse(&format!("https://{}", trimmed)) {
-                    u
-                } else {
-                    return YouTubeUrlType::Search(trimmed.to_string());
+    if let Ok(parsed) = Url::parse(&candidate) {
+        let host = parsed.host_str().unwrap_or_default().to_lowercase();
+        if host.contains("youtu.be") {
+            if let Some(seg) = parsed.path_segments().and_then(|mut s| s.next()) {
+                if is_valid_video_id(seg) {
+                    return ParsedYouTubeInput::Video(seg.to_string());
                 }
             }
-        };
-
-        let host = match parsed_url.host_str() {
-            Some(h) => h.to_lowercase(),
-            None => return YouTubeUrlType::Search(trimmed.to_string()),
-        };
-
-        if !host.contains("youtube.com") && !host.contains("youtu.be") {
-            return YouTubeUrlType::Search(trimmed.to_string());
-        }
-
-        if host == "youtu.be" || host.ends_with(".youtu.be") {
-            let path_segments: Vec<&str> = parsed_url.path_segments().map(|c| c.collect()).unwrap_or_default();
-            if let Some(&first) = path_segments.first() {
-                if Self::is_valid_video_id(first) {
-                    return YouTubeUrlType::Video(first.to_string());
+        } else if host.contains("youtube.com") {
+            let path = parsed.path();
+            if path == "/watch" {
+                for (k, v) in parsed.query_pairs() {
+                    if k == "v" && is_valid_video_id(&v) {
+                        return ParsedYouTubeInput::Video(v.into_owned());
+                    }
                 }
-            }
-        }
-
-        let path = parsed_url.path();
-
-        if path.starts_with("/shorts/") {
-            let id = path.trim_start_matches("/shorts/").split('/').next().unwrap_or("");
-            if Self::is_valid_video_id(id) {
-                return YouTubeUrlType::Shorts(id.to_string());
-            }
-        }
-
-        if path == "/watch" {
-            for (key, val) in parsed_url.query_pairs() {
-                if key == "v" && Self::is_valid_video_id(&val) {
-                    return YouTubeUrlType::Video(val.to_string());
+            } else if let Some(rest) = path.strip_prefix("/shorts/") {
+                let id = rest.split('/').next().unwrap_or_default();
+                if is_valid_video_id(id) {
+                    return ParsedYouTubeInput::Shorts(id.to_string());
+                }
+            } else if path == "/playlist" {
+                for (k, v) in parsed.query_pairs() {
+                    if k == "list" && !v.is_empty() {
+                        return ParsedYouTubeInput::Playlist(v.into_owned());
+                    }
+                }
+            } else if let Some(rest) = path.strip_prefix("/channel/") {
+                let cid = rest.split('/').next().unwrap_or_default();
+                if !cid.is_empty() {
+                    return ParsedYouTubeInput::Channel(cid.to_string());
                 }
             }
         }
+    }
 
-        if path == "/playlist" {
-            for (key, val) in parsed_url.query_pairs() {
-                if key == "list" && !val.is_empty() {
-                    return YouTubeUrlType::Playlist(val.to_string());
-                }
-            }
-        }
+    ParsedYouTubeInput::Search(trimmed.to_string())
+}
 
-        if path.starts_with("/@") {
-            let channel_handle = path.trim_start_matches('/');
-            return YouTubeUrlType::Channel(channel_handle.to_string());
-        }
+pub fn is_valid_video_id(s: &str) -> bool {
+    s.len() == 11
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
 
-        if path.starts_with("/channel/") {
-            let channel_id = path.trim_start_matches("/channel/");
-            return YouTubeUrlType::Channel(channel_id.to_string());
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-        YouTubeUrlType::Search(trimmed.to_string())
+    #[test]
+    fn test_parse_direct_video_id() {
+        assert_eq!(
+            parse_youtube_input("dQw4w9WgXcQ"),
+            ParsedYouTubeInput::Video("dQw4w9WgXcQ".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_watch_and_short_links() {
+        assert_eq!(
+            parse_youtube_input("https://www.youtube.com/watch?v=jfKfPfyJRdk&t=10s"),
+            ParsedYouTubeInput::Video("jfKfPfyJRdk".to_string())
+        );
+        assert_eq!(
+            parse_youtube_input("https://youtu.be/L_LUpnjgPso"),
+            ParsedYouTubeInput::Video("L_LUpnjgPso".to_string())
+        );
+        assert_eq!(
+            parse_youtube_input("https://www.youtube.com/shorts/5C_HPTJg5ek"),
+            ParsedYouTubeInput::Shorts("5C_HPTJg5ek".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_playlist_and_channel() {
+        assert_eq!(
+            parse_youtube_input("https://www.youtube.com/playlist?list=PL1234567890"),
+            ParsedYouTubeInput::Playlist("PL1234567890".to_string())
+        );
+        assert_eq!(
+            parse_youtube_input("https://www.youtube.com/channel/UCSJ4gkVC6NrvII8umztf0Ow"),
+            ParsedYouTubeInput::Channel("UCSJ4gkVC6NrvII8umztf0Ow".to_string())
+        );
     }
 }

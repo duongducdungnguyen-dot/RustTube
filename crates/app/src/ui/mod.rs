@@ -1,6 +1,7 @@
 pub mod channel_view;
 pub mod header;
 pub mod history_view;
+pub mod liked_view;
 pub mod playlists_view;
 pub mod settings_view;
 pub mod sidebar;
@@ -9,13 +10,17 @@ pub mod video_grid;
 pub mod watch_later_view;
 pub mod watch_view;
 
-pub use channel_view::render_channel_view;
-pub use header::render_header;
-pub use history_view::render_history_view;
-pub use playlists_view::render_playlists_view;
-pub use settings_view::render_settings_view;
-pub use sidebar::{render_sidebar, Page};
-pub use subscriptions_view::render_subscriptions_view;
-pub use video_grid::render_video_grid;
-pub use watch_later_view::render_watch_later_view;
-pub use watch_view::render_watch_view;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivePage {
+    Home,
+    Subscriptions,
+    Channel,
+    Playlists,
+    PlaylistDetail,
+    LikedVideos,
+    WatchLater,
+    History,
+    Watch,
+    Search,
+    Settings,
+}

@@ -1,33 +1,37 @@
-[app]
-theme = "dark"
-window_width = 1380
-window_height = 860
-startup_page = "home"
-auto_refresh_subscriptions = true
+# RustTube Configuration
+# Stored persistently in %APPDATA%\RustTube\config.toml on Windows 11
+# Application updates never overwrite this file.
 
-[player]
+[auth]
+google_client_id = "YOUR_GOOGLE_OAUTH_DESKTOP_CLIENT_ID.apps.googleusercontent.com"
+redirect_port = 8989
+keyring_service_name = "RustTube_Google_OAuth"
+auto_restore_session = true
+
+[sync]
+auto_sync_enabled = true
+sync_interval_minutes = 30
+max_uploads_per_channel = 10
+
+[playback]
 hwdec = "auto-safe"
-preferred_quality = "1080p"
-volume = 80
-speed = 1.0
-subtitles_enabled = false
-audio_device = "auto"
-cache_seconds = 30
+default_quality = "1080p"
+default_volume = 80
+default_speed = 1.0
+resume_playback = true
 
 [ytdlp]
 binary_path = "bin/yt-dlp.exe"
-cookies_browser = "chrome" # options: "none", "chrome", "edge", "firefox"
-auto_update_check = true
-max_search_results = 24
+cookies_browser = "none" # Options: "none", "chrome", "edge", "firefox"
+experimental_cookie_home_feed = false
+experimental_cookie_watch_later = false
 
-[auth]
-google_client_id = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
-redirect_port = 8989
-keyring_service_name = "RustTube_Google_OAuth"
+[storage]
+# Leave empty to use default %LOCALAPPDATA%\RustTube\data
+custom_data_dir = ""
+thumbnail_cache_mb = 256
 
-[cache]
-disk_cache_mb = 512
-thumbnail_dir = "cache/thumbnails"
-persist_history = true
-persist_watch_later = true
-max_history_items = 500
+[updater]
+auto_check_updates = true
+include_prereleases = false
+github_repo = "duongducdungnguyen-dot/RustTube"

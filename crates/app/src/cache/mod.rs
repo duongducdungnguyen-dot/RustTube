@@ -1,2 +1,3 @@
 pub mod thumbnail_loader;
-pub use thumbnail_loader::ThumbnailManager;
+
+pub use thumbnail_loader::*;

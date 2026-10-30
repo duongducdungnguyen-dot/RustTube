@@ -1,71 +1,71 @@
-use crate::cache::ThumbnailManager;
-use crate::theme::THEME;
-use egui::{RichText, Ui};
-use rusttube_core::models::VideoItem;
+use crate::ui::ActivePage;
+use egui::Ui;
+use rusttube_core::{UiCommand, WatchHistoryEntry};
+use tokio::sync::mpsc::UnboundedSender;
 
 pub fn render_history_view(
     ui: &mut Ui,
-    history_items: &[VideoItem],
-    thumbnails: &ThumbnailManager,
-    watch_later_ids: &[String],
-    on_clear_history: &mut bool,
-    on_select_video: &mut Option<VideoItem>,
-    on_toggle_watch_later: &mut Option<VideoItem>,
+    entries: &[WatchHistoryEntry],
+    search_query: &mut String,
+    current_page: &mut ActivePage,
+    cmd_tx: &UnboundedSender<UiCommand>,
 ) {
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new("Watch History")
-                    .size(18.0)
-                    .strong()
-                    .color(THEME.text_white),
-            );
-
-            ui.add_space(10.0);
-            ui.label(
-                RichText::new(format!("({} videos)", history_items.len()))
-                    .size(12.0)
-                    .color(THEME.text_muted),
-            );
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if !history_items.is_empty() {
-                    if ui
-                        .button(RichText::new("🗑 Clear History").size(11.0).color(THEME.crimson))
-                        .clicked()
-                    {
-                        *on_clear_history = true;
-                    }
-                }
+    ui.horizontal(|ui| {
+        ui.heading(format!("Local Watch History ({})", entries.len()));
+        if ui
+            .add(
+                egui::TextEdit::singleline(search_query)
+                    .hint_text("Search local history...")
+                    .desired_width(220.0),
+            )
+            .changed()
+        {
+            let q = search_query.trim().to_string();
+            let _ = cmd_tx.send(UiCommand::LoadHistory {
+                search_query: if q.is_empty() { None } else { Some(q) },
             });
-        });
-
-        ui.add_space(16.0);
-
-        if history_items.is_empty() {
-            ui.vertical_centered(|ui| {
-                ui.add_space(40.0);
-                ui.label(
-                    RichText::new("No watch history recorded yet.")
-                        .size(13.0)
-                        .color(THEME.text_subdued),
-                );
-                ui.label(
-                    RichText::new("Videos played inside RustTube will automatically appear here.")
-                        .size(11.0)
-                        .color(THEME.text_muted),
-                );
-            });
-            return;
         }
 
-        crate::ui::video_grid::render_video_grid(
-            ui,
-            history_items,
-            thumbnails,
-            watch_later_ids,
-            on_select_video,
-            on_toggle_watch_later,
-        );
+        if !entries.is_empty() && ui.button("Clear All History").clicked() {
+            let _ = cmd_tx.send(UiCommand::ClearHistory);
+        }
     });
+    ui.label("Local playback history is stored privately in SQLite on your device (YouTube's official Data API v3 does not expose personal watch history).");
+    ui.separator();
+
+    for entry in entries {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                if ui.button(format!("▶ {}", entry.video.title)).clicked() {
+                    *current_page = ActivePage::Watch;
+                    let _ = cmd_tx.send(UiCommand::PlayVideo {
+                        video: entry.video.clone(),
+                        playlist_queue: None,
+                        resume_from_seconds: if entry.last_position_seconds > 0 {
+                            Some(entry.last_position_seconds)
+                        } else {
+                            None
+                        },
+                    });
+                }
+
+                ui.label(&entry.video.channel_name);
+                if entry.last_position_seconds > 0 {
+                    ui.label(format!(
+                        "(Resume at {}:{:02})",
+                        entry.last_position_seconds / 60,
+                        entry.last_position_seconds % 60
+                    ));
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Remove Entry").clicked() {
+                        let _ = cmd_tx.send(UiCommand::RemoveHistoryEntry {
+                            video_id: entry.video.id.clone(),
+                        });
+                    }
+                });
+            });
+        });
+    }
 }

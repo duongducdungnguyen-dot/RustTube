@@ -1,29 +1,23 @@
 [package]
-name = "rusttube-app"
+name = "rusttube"
 version.workspace = true
 edition.workspace = true
-authors.workspace = true
-license.workspace = true
 
 [dependencies]
 rusttube-core = { path = "../core" }
-rusttube-player = { path = "../player" }
-rusttube-ytdlp = { path = "../ytdlp" }
+rusttube-storage = { path = "../storage" }
 rusttube-auth = { path = "../auth" }
 rusttube-api = { path = "../api" }
+rusttube-ytdlp = { path = "../ytdlp" }
+rusttube-player = { path = "../player" }
 rusttube-cache = { path = "../cache" }
-rusttube-storage = { path = "../storage" }
-
-eframe = { workspace = true }
-egui = { workspace = true }
-egui_extras = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-reqwest = { workspace = true }
-image = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-anyhow = { workspace = true }
-url = { workspace = true }
-dirs = { workspace = true }
+rusttube-updater = { path = "../updater" }
+tokio.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+image.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

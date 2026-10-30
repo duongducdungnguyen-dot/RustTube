@@ -1,144 +1,199 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct VideoItem {
-    pub id: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(alias = "channel", default)]
-    pub channel_name: String,
-    #[serde(default)]
-    pub channel_id: String,
-    #[serde(alias = "durationSeconds", default)]
-    pub duration_seconds: u32,
-    #[serde(alias = "duration", default)]
-    pub duration_string: String,
-    #[serde(default)]
-    pub view_count: u64,
-    #[serde(alias = "thumbnail", default)]
-    pub thumbnail_url: String,
-    #[serde(alias = "published", default)]
-    pub published_time: String,
-}
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VideoDetail {
-    pub item: VideoItem,
-    pub description: String,
-    pub available_qualities: Vec<String>,
-    pub selected_quality: String,
-    pub is_liked: bool,
-    pub is_watch_later: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChannelItem {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub subscriber_count: u64,
-    pub avatar_url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ChannelDetail {
-    pub item: ChannelItem,
-    pub uploads_playlist_id: String,
-    pub banner_url: String,
-    pub subscriber_text: String,
-    pub video_count: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PlaylistItem {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub video_count: u32,
-    pub thumbnail_url: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FeedCategory {
+    Personalized,
+    Subscriptions,
+    RelatedToLiked,
+    ContinueWatching,
+    Trending,
+    ExperimentalCookieHome,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PlaybackStatus {
-    pub video_id: String,
+pub struct VideoItem {
+    pub id: String,
     pub title: String,
-    pub position_seconds: f64,
-    pub duration_seconds: f64,
-    pub is_playing: bool,
-    pub is_buffering: bool,
-    pub volume: u32,
-    pub speed: f32,
-    pub quality: String,
-    pub subtitles: bool,
-    pub is_fullscreen: bool,
+    pub channel_name: String,
+    pub channel_id: String,
+    pub duration_seconds: u64,
+    pub duration_string: String,
+    pub view_count: u64,
+    pub views_text: String,
+    pub published_at: String,
+    pub published_timestamp: i64,
+    pub thumbnail_url: String,
+    pub description: String,
+    pub resume_position_seconds: Option<u64>,
+    pub source_tag: Option<String>,
 }
 
-impl Default for PlaybackStatus {
-    fn default() -> Self {
-        Self {
-            video_id: String::new(),
-            title: String::new(),
-            position_seconds: 0.0,
-            duration_seconds: 0.0,
-            is_playing: false,
-            is_buffering: false,
-            volume: 80,
-            speed: 1.0,
-            quality: "1080p".to_string(),
-            subtitles: false,
-            is_fullscreen: false,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChannelItem {
+    pub channel_id: String,
+    pub subscription_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub custom_url: Option<String>,
+    pub thumbnail_url: String,
+    pub subscriber_count: Option<String>,
+    pub video_count: Option<u64>,
+    pub uploads_playlist_id: Option<String>,
+    pub synced_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlaylistPrivacy {
+    Public,
+    Unlisted,
+    Private,
+}
+
+impl PlaylistPrivacy {
+    pub fn as_api_str(&self) -> &'static str {
+        match self {
+            PlaylistPrivacy::Public => "public",
+            PlaylistPrivacy::Unlisted => "unlisted",
+            PlaylistPrivacy::Private => "private",
+        }
+    }
+
+    pub fn from_api_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "public" => PlaylistPrivacy::Public,
+            "unlisted" => PlaylistPrivacy::Unlisted,
+            _ => PlaylistPrivacy::Private,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StreamInfo {
-    pub video_url: String,
-    pub audio_url: Option<String>,
-    pub format_id: String,
-    pub resolution: String,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaylistItem {
+    pub playlist_id: String,
+    pub title: String,
+    pub description: String,
+    pub item_count: u32,
+    pub thumbnail_url: String,
+    pub privacy_status: PlaylistPrivacy,
+    pub is_owned: bool,
+    pub synced_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum YouTubeUrlType {
-    Video(String),
-    Shorts(String),
-    Playlist(String),
-    Channel(String),
-    Search(String),
-    Invalid,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PlaylistVideoItem {
+    pub playlist_item_id: String,
+    pub playlist_id: String,
+    pub video: VideoItem,
+    pub position: u32,
+    pub availability_status: VideoAvailability,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum AppPage {
-    Home,
-    Watch(String),
-    Search,
-    Subscriptions,
-    Channel(String),
-    Playlists,
-    PlaylistDetail(String),
-    WatchLater,
-    History,
-    LikedVideos,
-    Settings,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoAvailability {
+    Available,
+    Private,
+    Deleted,
+    Unavailable,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum AuthState {
-    Unauthenticated,
-    Authenticating,
-    Authenticated { user_name: String, email: String, avatar_url: String },
-    Error(String),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WatchLaterSource {
+    LocalRustTube,
+    ExperimentalYouTubeCookie,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AppUpdateInfo {
-    pub current_version: String,
-    pub latest_version: String,
-    pub is_update_available: bool,
-    pub release_notes: String,
-    pub download_url: String,
-    pub sha256_checksum: Option<String>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchLaterEntry {
+    pub video: VideoItem,
+    pub added_at: i64,
+    pub source: WatchLaterSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatchHistoryEntry {
+    pub video: VideoItem,
+    pub watched_at: i64,
+    pub last_position_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserProfile {
+    pub channel_id: String,
+    pub display_name: String,
+    pub email: String,
+    pub handle: String,
+    pub avatar_url: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SyncErrorKind {
+    Authentication,
+    AuthorizationScope,
+    Network,
+    QuotaExceeded,
+    Parsing,
+    Database,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClassifiedError {
+    pub kind: SyncErrorKind,
+    pub message: String,
+    pub occurred_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncState {
+    pub is_syncing: bool,
+    pub last_successful_sync: Option<i64>,
+    pub subscriptions_count: usize,
+    pub playlists_count: usize,
+    pub liked_videos_count: usize,
+    pub last_error: Option<ClassifiedError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseManifest {
+    pub version: String,
+    pub tag_name: String,
     pub published_at: String,
+    pub release_notes: String,
+    pub html_url: String,
+    pub asset_name: String,
+    pub download_url: String,
+    pub sha256: Option<String>,
+    pub size_bytes: u64,
+    pub is_prerelease: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UpdateState {
+    Idle,
+    Checking,
+    UpToDate {
+        current_version: String,
+        checked_at: i64,
+    },
+    UpdateAvailable {
+        current_version: String,
+        manifest: ReleaseManifest,
+        checked_at: i64,
+    },
+    Downloading {
+        version: String,
+        downloaded_bytes: u64,
+        total_bytes: u64,
+    },
+    StagedReadyToRestart {
+        version: String,
+        staged_path: String,
+        sha256_verified: bool,
+    },
+    Failed {
+        message: String,
+        rolled_back: bool,
+    },
 }

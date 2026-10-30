@@ -1,333 +1,154 @@
-use anyhow::{anyhow, Result};
-use rusttube_core::models::{StreamInfo, VideoDetail, VideoItem};
+use anyhow::{Context, Result};
+use rusttube_core::VideoItem;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use tokio::process::Command;
 
 #[derive(Clone)]
-pub struct YtDlpWrapper {
-    binary_path: PathBuf,
+pub struct YtDlpRunner {
+    binary_path: String,
     cookies_browser: String,
-    has_node_runtime: bool,
 }
 
-impl YtDlpWrapper {
-    pub fn new<P: AsRef<Path>>(binary_path: P, cookies_browser: &str) -> Self {
-        let has_node = std::env::var_os("PATH").map_or(false, |paths| {
-            std::env::split_paths(&paths).any(|p| p.join("node").exists() || p.join("node.exe").exists())
-        });
+impl YtDlpRunner {
+    pub fn new(binary_path: impl Into<String>, cookies_browser: impl Into<String>) -> Self {
         Self {
-            binary_path: binary_path.as_ref().to_path_buf(),
-            cookies_browser: cookies_browser.to_string(),
-            has_node_runtime: has_node,
+            binary_path: binary_path.into(),
+            cookies_browser: cookies_browser.into(),
         }
     }
 
-    pub fn binary_exists(&self) -> bool {
-        self.binary_path.exists()
+    pub async fn search(&self, query: &str, max_results: usize) -> Result<Vec<VideoItem>> {
+        let search_arg = format!("ytsearch{}:{}", max_results.clamp(1, 50), query);
+        let args = vec![
+            search_arg,
+            "--dump-json".to_string(),
+            "--flat-playlist".to_string(),
+            "--no-warnings".to_string(),
+            "--ignore-errors".to_string(),
+        ];
+        self.run_json_lines(&args, false).await
     }
 
-    fn configure_command(&self) -> Command {
+    /// Optional experimental cookie-based YouTube homepage provider (:ytsubscriptions / :ytfav / homepage)
+    /// Requires explicit user opt-in (`experimental_cookie_home_feed = true`).
+    pub async fn fetch_experimental_cookie_home(&self, max_results: usize) -> Result<Vec<VideoItem>> {
+        if self.cookies_browser == "none" || self.cookies_browser.is_empty() {
+            anyhow::bail!("Browser cookies must be enabled in Settings to use experimental homepage extraction");
+        }
+        let args = vec![
+            "https://www.youtube.com".to_string(),
+            "--playlist-end".to_string(),
+            max_results.to_string(),
+            "--dump-json".to_string(),
+            "--flat-playlist".to_string(),
+            "--no-warnings".to_string(),
+        ];
+        self.run_json_lines(&args, true).await
+    }
+
+    /// Optional experimental cookie-based YouTube Watch Later extraction (`:ytwatchlater`).
+    pub async fn fetch_experimental_watch_later(&self, max_results: usize) -> Result<Vec<VideoItem>> {
+        if self.cookies_browser == "none" || self.cookies_browser.is_empty() {
+            anyhow::bail!("Browser cookies must be configured to read YouTube Watch Later (:ytwatchlater)");
+        }
+        let args = vec![
+            ":ytwatchlater".to_string(),
+            "--playlist-end".to_string(),
+            max_results.to_string(),
+            "--dump-json".to_string(),
+            "--flat-playlist".to_string(),
+            "--no-warnings".to_string(),
+        ];
+        self.run_json_lines(&args, true).await
+    }
+
+    async fn run_json_lines(&self, base_args: &[String], use_cookies: bool) -> Result<Vec<VideoItem>> {
         let mut cmd = Command::new(&self.binary_path);
-        if self.has_node_runtime {
-            cmd.arg("--js-runtimes").arg("node");
+        cmd.args(base_args);
+        if use_cookies && self.cookies_browser != "none" && !self.cookies_browser.is_empty() {
+            cmd.arg("--cookies-from-browser").arg(&self.cookies_browser);
         }
-        let b = self.cookies_browser.to_lowercase();
-        if b != "none" && !b.is_empty() {
-            cmd.arg("--cookies-from-browser").arg(&b);
-        }
-        cmd
-    }
 
-    pub async fn get_version(&self) -> Result<String> {
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.arg("--version")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let output = cmd
+            .output()
+            .await
+            .with_context(|| format!("Failed to execute yt-dlp at {}", self.binary_path))?;
 
-        let output = cmd.output().await?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            Err(anyhow!(
-                "Failed to get yt-dlp version: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ))
-        }
-    }
-
-    pub async fn fetch_trending_feed(&self, count: usize) -> Result<Vec<VideoItem>> {
-        self.search_videos("trending videos", count).await
-    }
-
-    pub async fn search_videos(&self, query: &str, count: usize) -> Result<Vec<VideoItem>> {
-        let search_target = format!("ytsearch{}:{}", count, query);
-        let mut cmd = self.configure_command();
-        cmd.arg(&search_target)
-            .arg("--dump-json")
-            .arg("--flat-playlist")
-            .arg("--no-warnings")
-            .arg("--ignore-errors")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let output = cmd.output().await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut videos = Vec::new();
 
-        let mut results = Vec::new();
         for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(json) = serde_json::from_str::<Value>(line) {
-                if let Some(item) = parse_video_json(&json) {
-                    if !results.iter().any(|v: &VideoItem| v.id == item.id) {
-                        results.push(item);
-                    }
+            if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
+                if let Some(item) = Self::parse_video_json(&json) {
+                    videos.push(item);
                 }
             }
         }
-
-        Ok(results)
+        Ok(videos)
     }
 
-    pub async fn get_available_qualities(&self, video_id: &str) -> Vec<String> {
-        let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
-        let mut cmd = self.configure_command();
-        cmd.arg("--dump-json")
-            .arg("--no-playlist")
-            .arg(&video_url)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+    pub fn parse_video_json(json: &Value) -> Option<VideoItem> {
+        let id = json.get("id")?.as_str()?.to_string();
+        let duration_sec = json.get("duration").and_then(|v| v.as_u64()).unwrap_or(0);
+        let duration_string = json
+            .get("duration_string")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| format!("{}:{:02}", duration_sec / 60, duration_sec % 60));
 
-        if let Ok(output) = cmd.output().await {
-            if output.status.success() {
-                if let Ok(json) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&output.stdout)) {
-                    if let Some(formats) = json["formats"].as_array() {
-                        let mut heights: Vec<u64> = formats
-                            .iter()
-                            .filter_map(|f| f["height"].as_u64())
-                            .filter(|&h| h > 0)
-                            .collect();
-                        heights.sort_unstable_by(|a, b| b.cmp(a));
-                        heights.dedup();
-
-                        let mut qualities = vec!["Auto".to_string()];
-                        for h in heights {
-                            let label = if h >= 2160 {
-                                "4K (2160p)".to_string()
-                            } else if h >= 1440 {
-                                "1440p".to_string()
-                            } else {
-                                format!("{}p", h)
-                            };
-                            if !qualities.contains(&label) {
-                                qualities.push(label);
-                            }
-                        }
-                        if qualities.len() > 1 {
-                            return qualities;
-                        }
-                    }
-                }
-            }
-        }
-
-        vec!["Auto".into(), "1080p".into(), "720p".into(), "480p".into(), "360p".into()]
-    }
-
-    pub async fn get_stream_info(&self, video_id: &str, preferred_quality: &str) -> Result<StreamInfo> {
-        let format_spec = match preferred_quality {
-            "4K" | "2160p" | "4K (2160p)" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
-            "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best",
-            "1080p" => "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-            "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "480p" => "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
-            "360p" => "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
-            _ => "bestvideo+bestaudio/best",
+        let view_count = json.get("view_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let views_text = if view_count >= 1_000_000 {
+            format!("{:.1}M views", view_count as f64 / 1_000_000.0)
+        } else if view_count >= 1_000 {
+            format!("{:.1}K views", view_count as f64 / 1_000.0)
+        } else {
+            format!("{} views", view_count)
         };
 
-        let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
-        let mut cmd = self.configure_command();
-        cmd.arg("--print")
-            .arg("%(url)s|%(vcodec)s|%(acodec)s|%(resolution)s")
-            .arg("-f")
-            .arg(format_spec)
-            .arg("--no-playlist")
-            .arg(&video_url)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let output = cmd.output().await?;
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut found_video_url = None;
-            let mut found_audio_url = None;
-            let mut detected_res = preferred_quality.to_string();
-
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.trim().split('|').collect();
-                if parts.len() >= 3 {
-                    let u = parts[0].trim();
-                    let vcodec = parts[1].trim();
-                    let acodec = parts[2].trim();
-                    if parts.len() >= 4 && !parts[3].trim().is_empty() && parts[3].trim() != "null" {
-                        detected_res = parts[3].trim().to_string();
-                    }
-
-                    if vcodec != "none" && !vcodec.is_empty() && found_video_url.is_none() {
-                        found_video_url = Some(u.to_string());
-                    }
-                    if acodec != "none" && !acodec.is_empty() && (vcodec == "none" || vcodec.is_empty()) && found_audio_url.is_none() {
-                        found_audio_url = Some(u.to_string());
-                    }
-                }
-            }
-
-            if let Some(v_url) = found_video_url {
-                return Ok(StreamInfo {
-                    video_url: v_url,
-                    audio_url: found_audio_url,
-                    format_id: format_spec.to_string(),
-                    resolution: detected_res,
-                });
-            }
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let first_err = stderr
-            .lines()
-            .find(|l| l.contains("ERROR"))
-            .unwrap_or_else(|| stderr.lines().next().unwrap_or("Stream extraction failed"))
-            .trim();
-
-        Err(anyhow!(
-            "Could not extract stream for video {}: {}. If required, enable browser cookies in Settings.",
-            video_id,
-            first_err
-        ))
-    }
-
-    pub async fn get_video_detail(&self, video_id: &str) -> Result<VideoDetail> {
-        let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
-        let mut cmd = self.configure_command();
-        cmd.arg("--dump-json")
-            .arg("--no-playlist")
-            .arg(&video_url)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            return Err(anyhow!(
-                "Failed to get video info: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let json: Value = serde_json::from_str(&stdout)?;
-
-        let item = parse_video_json(&json).ok_or_else(|| anyhow!("Failed to parse video info"))?;
-        let description = json["description"].as_str().unwrap_or("").to_string();
-
-        let mut available_qualities = Vec::new();
-        if let Some(formats) = json["formats"].as_array() {
-            for f in formats {
-                if let Some(h) = f["height"].as_u64() {
-                    let label = format!("{}p", h);
-                    if !available_qualities.contains(&label) {
-                        available_qualities.push(label);
-                    }
-                }
-            }
-        }
-        if available_qualities.is_empty() {
-            available_qualities = vec!["360p".into(), "720p".into(), "1080p".into()];
-        }
-
-        Ok(VideoDetail {
-            item,
-            description,
-            available_qualities,
-            selected_quality: "1080p".to_string(),
-            is_liked: false,
-            is_watch_later: false,
+        Some(VideoItem {
+            id: id.clone(),
+            title: json
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled")
+                .to_string(),
+            channel_name: json
+                .get("channel")
+                .or_else(|| json.get("uploader"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("YouTube Channel")
+                .to_string(),
+            channel_id: json
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            duration_seconds: duration_sec,
+            duration_string,
+            view_count,
+            views_text,
+            published_at: json
+                .get("upload_date")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            published_timestamp: json.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
+            thumbnail_url: json
+                .get("thumbnail")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", id)),
+            description: json
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            resume_position_seconds: None,
+            source_tag: None,
         })
-    }
-
-    pub async fn update_binary(&self) -> Result<String> {
-        let mut cmd = Command::new(&self.binary_path);
-        cmd.arg("-U")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let output = cmd.output().await?;
-        let out_str = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(out_str)
-    }
-}
-
-fn parse_video_json(json: &Value) -> Option<VideoItem> {
-    let id = json["id"].as_str()?.to_string();
-    let title = json["title"].as_str()?.to_string();
-    let channel_name = json["channel"]
-        .as_str()
-        .or_else(|| json["uploader"].as_str())
-        .unwrap_or("YouTube Channel")
-        .to_string();
-    let channel_id = json["channel_id"]
-        .as_str()
-        .or_else(|| json["uploader_id"].as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let duration_seconds = json["duration"].as_f64().unwrap_or(0.0) as u32;
-    let duration_string = if let Some(s) = json["duration_string"].as_str() {
-        s.to_string()
-    } else {
-        format_duration(duration_seconds)
-    };
-    let view_count = json["view_count"].as_u64().unwrap_or(0);
-
-    let thumbnail_url = json["thumbnail"]
-        .as_str()
-        .or_else(|| {
-            json["thumbnails"]
-                .as_array()
-                .and_then(|a| a.last())
-                .and_then(|t| t["url"].as_str())
-        })
-        .unwrap_or("")
-        .to_string();
-
-    let published_time = json["upload_date"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-
-    Some(VideoItem {
-        id,
-        title,
-        channel_name,
-        channel_id,
-        duration_seconds,
-        duration_string,
-        view_count,
-        thumbnail_url,
-        published_time,
-    })
-}
-
-fn format_duration(total_seconds: u32) -> String {
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-    if hours > 0 {
-        format!("{}:{:02}:{:02}", hours, minutes, seconds)
-    } else {
-        format!("{}:{:02}", minutes, seconds)
     }
 }

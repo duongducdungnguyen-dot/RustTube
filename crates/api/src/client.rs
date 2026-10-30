@@ -1,11 +1,17 @@
-use anyhow::{anyhow, Result};
-use reqwest::Client;
-use rusttube_core::models::{ChannelItem, PlaylistItem, VideoItem};
-use serde_json::Value;
+use chrono::Utc;
+use reqwest::{Client, StatusCode};
+use rusttube_core::{
+    ChannelItem, ClassifiedError, PlaylistItem, PlaylistPrivacy, PlaylistVideoItem, SyncErrorKind,
+    VideoAvailability, VideoItem, VideoRating,
+};
+use serde_json::{json, Value};
+use std::collections::HashSet;
 
+const YT_API_BASE: &str = "https://www.googleapis.com/youtube/v3";
+
+#[derive(Clone)]
 pub struct YouTubeApiClient {
-    client: Client,
-    base_url: &'static str,
+    http: Client,
 }
 
 impl Default for YouTubeApiClient {
@@ -17,300 +23,495 @@ impl Default for YouTubeApiClient {
 impl YouTubeApiClient {
     pub fn new() -> Self {
         Self {
-            client: Client::builder()
-                .timeout(std::time::Duration::from_secs(15))
+            http: Client::builder()
+                .timeout(std::time::Duration::from_secs(20))
                 .build()
                 .unwrap_or_default(),
-            base_url: "https://www.googleapis.com/youtube/v3",
         }
     }
 
-    pub async fn get_my_channel(&self, access_token: &str) -> Result<(String, String, String)> {
-        let url = format!("{}/channels?part=snippet&mine=true", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(access_token)
-            .send()
-            .await?;
+    /// Classifies HTTP status codes and Google API error payloads into granular SyncErrorKind variants.
+    pub fn classify_http_error(status: StatusCode, body_text: &str) -> ClassifiedError {
+        let now = Utc::now().timestamp();
+        let lower = body_text.to_lowercase();
 
-        if !resp.status().is_success() {
-            return Err(anyhow!("YouTube API channels error: {}", resp.status()));
+        if status == StatusCode::UNAUTHORIZED {
+            return ClassifiedError {
+                kind: SyncErrorKind::Authentication,
+                message: "Google OAuth access token expired or invalid (HTTP 401)".to_string(),
+                occurred_at: now,
+            };
         }
 
-        let json: Value = resp.json().await?;
-        let item = json["items"]
-            .as_array()
-            .and_then(|a| a.first())
-            .ok_or_else(|| anyhow!("No channel found for authenticated account"))?;
+        if status == StatusCode::FORBIDDEN {
+            if lower.contains("quotaexceeded") || lower.contains("dailylimitexceeded") {
+                return ClassifiedError {
+                    kind: SyncErrorKind::QuotaExceeded,
+                    message: "YouTube Data API v3 daily quota exceeded (HTTP 403)".to_string(),
+                    occurred_at: now,
+                };
+            }
+            if lower.contains("insufficientpermissions") || lower.contains("scope") {
+                return ClassifiedError {
+                    kind: SyncErrorKind::AuthorizationScope,
+                    message: "Missing required YouTube OAuth scope for this operation".to_string(),
+                    occurred_at: now,
+                };
+            }
+            return ClassifiedError {
+                kind: SyncErrorKind::AuthorizationScope,
+                message: format!("YouTube API access forbidden (HTTP 403): {}", body_text),
+                occurred_at: now,
+            };
+        }
 
-        let title = item["snippet"]["title"]
-            .as_str()
-            .unwrap_or("Personal Account")
-            .to_string();
-        let custom_url = item["snippet"]["customUrl"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-        let avatar_url = item["snippet"]["thumbnails"]["default"]["url"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-
-        Ok((title, custom_url, avatar_url))
+        ClassifiedError {
+            kind: SyncErrorKind::Network,
+            message: format!("YouTube API returned HTTP {}", status.as_u16()),
+            occurred_at: now,
+        }
     }
 
-    pub async fn get_subscriptions(&self, access_token: &str, page_token: Option<&str>) -> Result<(Vec<ChannelItem>, Option<String>)> {
-        let mut url = format!(
-            "{}/subscriptions?part=snippet&mine=true&maxResults=50&order=alphabetical",
-            self.base_url
-        );
-        if let Some(token) = page_token {
-            url.push_str(&format!("&pageToken={}", token));
-        }
+    /// Retrieves ALL subscribed channels by exhausting nextPageToken pagination,
+    /// then resolves each channel's uploads playlist in batched channels.list calls (50 IDs per request).
+    pub async fn fetch_all_subscriptions(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<ChannelItem>, ClassifiedError> {
+        let mut subscriptions = Vec::new();
+        let mut page_token: Option<String> = None;
 
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(access_token)
-            .send()
-            .await?;
+        loop {
+            let mut req = self
+                .http
+                .get(format!("{}/subscriptions", YT_API_BASE))
+                .bearer_auth(access_token)
+                .query(&[
+                    ("part", "snippet"),
+                    ("mine", "true"),
+                    ("maxResults", "50"),
+                    ("order", "alphabetical"),
+                ]);
 
-        if !resp.status().is_success() {
-            return Err(anyhow!("YouTube API subscriptions error: {}", resp.status()));
-        }
+            if let Some(ref token) = page_token {
+                req = req.query(&[("pageToken", token.as_str())]);
+            }
 
-        let json: Value = resp.json().await?;
-        let next_page_token = json["nextPageToken"].as_str().map(|s| s.to_string());
-        let mut results = Vec::new();
+            let resp = req.send().await.map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Failed to fetch subscriptions: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
 
-        if let Some(items) = json["items"].as_array() {
-            for item in items {
-                let snippet = &item["snippet"];
-                let id = snippet["resourceId"]["channelId"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let title = snippet["title"].as_str().unwrap_or_default().to_string();
-                let description = snippet["description"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let avatar_url = snippet["thumbnails"]["default"]["url"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(Self::classify_http_error(status, &text));
+            }
 
-                results.push(ChannelItem {
-                    id,
-                    title,
-                    description,
-                    subscriber_count: 0,
-                    avatar_url,
-                });
+            let payload: Value = resp.json().await.map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Parsing,
+                message: format!("Failed to parse subscriptions JSON: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
+
+            if let Some(items) = payload.get("items").and_then(|v| v.as_array()) {
+                for item in items {
+                    let sub_id = item.get("id").and_then(|v| v.as_str()).map(String::from);
+                    let snippet = item.get("snippet").unwrap_or(&Value::Null);
+                    let channel_id = snippet
+                        .get("resourceId")
+                        .and_then(|r| r.get("channelId"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    if channel_id.is_empty() {
+                        continue;
+                    }
+
+                    let uploads_guess = if let Some(rest) = channel_id.strip_prefix("UC") {
+                        Some(format!("UU{}", rest))
+                    } else {
+                        None
+                    };
+
+                    subscriptions.push(ChannelItem {
+                        channel_id,
+                        subscription_id: sub_id,
+                        title: snippet
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("YouTube Channel")
+                            .to_string(),
+                        description: snippet
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        custom_url: None,
+                        thumbnail_url: snippet
+                            .pointer("/thumbnails/high/url")
+                            .or_else(|| snippet.pointer("/thumbnails/default/url"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        subscriber_count: None,
+                        video_count: None,
+                        uploads_playlist_id: uploads_guess,
+                        synced_at: Utc::now().timestamp(),
+                    });
+                }
+            }
+
+            page_token = payload
+                .get("nextPageToken")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if page_token.is_none() {
+                break;
             }
         }
 
-        Ok((results, next_page_token))
-    }
-
-    pub async fn get_playlists(&self, access_token: &str, page_token: Option<&str>) -> Result<(Vec<PlaylistItem>, Option<String>)> {
-        let mut url = format!(
-            "{}/playlists?part=snippet,contentDetails&mine=true&maxResults=50",
-            self.base_url
-        );
-        if let Some(token) = page_token {
-            url.push_str(&format!("&pageToken={}", token));
-        }
-
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(access_token)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!("YouTube API playlists error: {}", resp.status()));
-        }
-
-        let json: Value = resp.json().await?;
-        let next_page_token = json["nextPageToken"].as_str().map(|s| s.to_string());
-        let mut results = Vec::new();
-
-        if let Some(items) = json["items"].as_array() {
-            for item in items {
-                let id = item["id"].as_str().unwrap_or_default().to_string();
-                let snippet = &item["snippet"];
-                let title = snippet["title"].as_str().unwrap_or_default().to_string();
-                let description = snippet["description"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let video_count = item["contentDetails"]["itemCount"]
-                    .as_u64()
-                    .unwrap_or(0) as u32;
-                let thumbnail_url = snippet["thumbnails"]["medium"]["url"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-
-                results.push(PlaylistItem {
-                    id,
-                    title,
-                    description,
-                    video_count,
-                    thumbnail_url,
-                });
+        // Enrich channels in batches of 50 with contentDetails.relatedPlaylists.uploads & statistics
+        for chunk in subscriptions.chunks_mut(50) {
+            let ids: Vec<String> = chunk.iter().map(|c| c.channel_id.clone()).collect();
+            let joined = ids.join(",");
+            if let Ok(resp) = self
+                .http
+                .get(format!("{}/channels", YT_API_BASE))
+                .bearer_auth(access_token)
+                .query(&[
+                    ("part", "contentDetails,statistics,snippet"),
+                    ("id", joined.as_str()),
+                ])
+                .send()
+                .await
+            {
+                if let Ok(payload) = resp.json::<Value>().await {
+                    if let Some(items) = payload.get("items").and_then(|v| v.as_array()) {
+                        for info in items {
+                            let cid = info.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                            if let Some(target) = chunk.iter_mut().find(|c| c.channel_id == cid) {
+                                if let Some(uploads) = info
+                                    .pointer("/contentDetails/relatedPlaylists/uploads")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    target.uploads_playlist_id = Some(uploads.to_string());
+                                }
+                                if let Some(subs) = info
+                                    .pointer("/statistics/subscriberCount")
+                                    .and_then(|v| v.as_str())
+                                {
+                                    target.subscriber_count = Some(subs.to_string());
+                                }
+                                if let Some(custom) =
+                                    info.pointer("/snippet/customUrl").and_then(|v| v.as_str())
+                                {
+                                    target.custom_url = Some(custom.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        Ok((results, next_page_token))
+        Ok(subscriptions)
     }
 
-    pub async fn get_playlist_items(
+    pub async fn unsubscribe_channel(
+        &self,
+        access_token: &str,
+        subscription_id: &str,
+    ) -> Result<(), ClassifiedError> {
+        let resp = self
+            .http
+            .delete(format!("{}/subscriptions", YT_API_BASE))
+            .bearer_auth(access_token)
+            .query(&[("id", subscription_id)])
+            .send()
+            .await
+            .map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Network error unsubscribing: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
+        }
+        Ok(())
+    }
+
+    /// Retrieves recent uploads from a channel's uploads playlist using playlistItems.list (1 quota unit).
+    pub async fn fetch_playlist_videos_page(
         &self,
         access_token: &str,
         playlist_id: &str,
-    ) -> Result<Vec<VideoItem>> {
-        let url = format!(
-            "{}/playlistItems?part=snippet,contentDetails&playlistId={}&maxResults=50",
-            self.base_url, playlist_id
-        );
-        let resp = self
-            .client
-            .get(&url)
+        max_results: u32,
+        page_token: Option<&str>,
+    ) -> Result<(Vec<PlaylistVideoItem>, Option<String>), ClassifiedError> {
+        let max_str = max_results.clamp(1, 50).to_string();
+        let mut req = self
+            .http
+            .get(format!("{}/playlistItems", YT_API_BASE))
             .bearer_auth(access_token)
-            .send()
-            .await?;
+            .query(&[
+                ("part", "snippet,contentDetails,status"),
+                ("playlistId", playlist_id),
+                ("maxResults", max_str.as_str()),
+            ]);
 
-        if !resp.status().is_success() {
-            return Err(anyhow!("YouTube API playlistItems error: {}", resp.status()));
+        if let Some(token) = page_token {
+            req = req.query(&[("pageToken", token)]);
         }
 
-        let json: Value = resp.json().await?;
-        let mut results = Vec::new();
+        let resp = req.send().await.map_err(|e| ClassifiedError {
+            kind: SyncErrorKind::Network,
+            message: format!("Failed to fetch playlist items: {}", e),
+            occurred_at: Utc::now().timestamp(),
+        })?;
 
-        if let Some(items) = json["items"].as_array() {
-            for item in items {
-                let snippet = &item["snippet"];
-                let video_id = snippet["resourceId"]["videoId"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let title = snippet["title"].as_str().unwrap_or_default().to_string();
-                let channel_name = snippet["videoOwnerChannelTitle"]
-                    .as_str()
-                    .unwrap_or("YouTube Channel")
-                    .to_string();
-                let channel_id = snippet["videoOwnerChannelId"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let thumbnail_url = snippet["thumbnails"]["high"]["url"]
-                    .as_str()
-                    .or_else(|| snippet["thumbnails"]["medium"]["url"].as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let published_time = snippet["publishedAt"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
+        }
 
-                results.push(VideoItem {
-                    id: video_id,
+        let payload: Value = resp.json().await.map_err(|e| ClassifiedError {
+            kind: SyncErrorKind::Parsing,
+            message: format!("Malformed playlistItems JSON: {}", e),
+            occurred_at: Utc::now().timestamp(),
+        })?;
+
+        let items = Self::parse_playlist_items_payload(playlist_id, &payload);
+        let next_token = payload
+            .get("nextPageToken")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        Ok((items, next_token))
+    }
+
+    pub fn parse_playlist_items_payload(
+        playlist_id: &str,
+        payload: &Value,
+    ) -> Vec<PlaylistVideoItem> {
+        let mut out = Vec::new();
+        let Some(arr) = payload.get("items").and_then(|v| v.as_array()) else {
+            return out;
+        };
+
+        for (idx, item) in arr.iter().enumerate() {
+            let playlist_item_id = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let snippet = item.get("snippet").unwrap_or(&Value::Null);
+            let title = snippet
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Untitled")
+                .to_string();
+            let privacy = item
+                .pointer("/status/privacyStatus")
+                .and_then(|v| v.as_str())
+                .unwrap_or("public");
+
+            let availability = if title == "Private video" || privacy == "private" {
+                VideoAvailability::Private
+            } else if title == "Deleted video" {
+                VideoAvailability::Deleted
+            } else {
+                VideoAvailability::Available
+            };
+
+            let video_id = snippet
+                .pointer("/resourceId/videoId")
+                .or_else(|| item.pointer("/contentDetails/videoId"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let published_at = item
+                .pointer("/contentDetails/videoPublishedAt")
+                .or_else(|| snippet.get("publishedAt"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            let published_ts = chrono::DateTime::parse_from_rfc3339(&published_at)
+                .map(|dt| dt.timestamp())
+                .unwrap_or(0);
+
+            let position = snippet
+                .get("position")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(idx as u64) as u32;
+
+            out.push(PlaylistVideoItem {
+                playlist_item_id,
+                playlist_id: playlist_id.to_string(),
+                position,
+                availability_status: availability,
+                video: VideoItem {
+                    id: video_id.clone(),
                     title,
-                    channel_name,
-                    channel_id,
+                    channel_name: snippet
+                        .get("videoOwnerChannelTitle")
+                        .or_else(|| snippet.get("channelTitle"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("YouTube Channel")
+                        .to_string(),
+                    channel_id: snippet
+                        .get("videoOwnerChannelId")
+                        .or_else(|| snippet.get("channelId"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     duration_seconds: 0,
-                    duration_string: "--:--".to_string(),
+                    duration_string: String::new(),
                     view_count: 0,
-                    thumbnail_url,
-                    published_time,
-                });
+                    views_text: String::new(),
+                    published_at,
+                    published_timestamp: published_ts,
+                    thumbnail_url: snippet
+                        .pointer("/thumbnails/high/url")
+                        .or_else(|| snippet.pointer("/thumbnails/medium/url"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| {
+                            format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", video_id)
+                        }),
+                    description: snippet
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    resume_position_seconds: None,
+                    source_tag: None,
+                },
+            });
+        }
+        out
+    }
+
+    /// Builds a personalized Home feed from subscribed channels' uploads playlists, liked videos, and local history,
+    /// sorted by publication timestamp descending and deduplicated by video ID.
+    pub fn merge_and_deduplicate_personalized_feed(batches: Vec<Vec<VideoItem>>) -> Vec<VideoItem> {
+        let mut seen = HashSet::new();
+        let mut merged = Vec::new();
+
+        for batch in batches {
+            for v in batch {
+                if !v.id.is_empty() && seen.insert(v.id.clone()) {
+                    merged.push(v);
+                }
             }
         }
 
-        Ok(results)
+        merged.sort_by(|a, b| b.published_timestamp.cmp(&a.published_timestamp));
+        merged
     }
 
-    pub async fn get_liked_videos(&self, access_token: &str) -> Result<Vec<VideoItem>> {
-        let url = format!(
-            "{}/videos?part=snippet,contentDetails,statistics&myRating=like&maxResults=50",
-            self.base_url
-        );
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(access_token)
-            .send()
-            .await?;
+    /// Retrieves all owned playlists using pagination.
+    pub async fn fetch_all_playlists(
+        &self,
+        access_token: &str,
+    ) -> Result<Vec<PlaylistItem>, ClassifiedError> {
+        let mut playlists = Vec::new();
+        let mut page_token: Option<String> = None;
 
-        if !resp.status().is_success() {
-            return Err(anyhow!("YouTube API liked videos error: {}", resp.status()));
-        }
+        loop {
+            let mut req = self
+                .http
+                .get(format!("{}/playlists", YT_API_BASE))
+                .bearer_auth(access_token)
+                .query(&[
+                    ("part", "snippet,contentDetails,status"),
+                    ("mine", "true"),
+                    ("maxResults", "50"),
+                ]);
 
-        let json: Value = resp.json().await?;
-        let mut results = Vec::new();
+            if let Some(ref token) = page_token {
+                req = req.query(&[("pageToken", token.as_str())]);
+            }
 
-        if let Some(items) = json["items"].as_array() {
-            for item in items {
-                let id = item["id"].as_str().unwrap_or_default().to_string();
-                let snippet = &item["snippet"];
-                let title = snippet["title"].as_str().unwrap_or_default().to_string();
-                let channel_name = snippet["channelTitle"]
-                    .as_str()
-                    .unwrap_or("YouTube Channel")
-                    .to_string();
-                let channel_id = snippet["channelId"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                let thumbnail_url = snippet["thumbnails"]["high"]["url"]
-                    .as_str()
-                    .or_else(|| snippet["thumbnails"]["medium"]["url"].as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let view_count = item["statistics"]["viewCount"]
-                    .as_str()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                let published_time = snippet["publishedAt"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
+            let resp = req.send().await.map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Failed to fetch playlists: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
 
-                results.push(VideoItem {
-                    id,
-                    title,
-                    channel_name,
-                    channel_id,
-                    duration_seconds: 0,
-                    duration_string: "--:--".to_string(),
-                    view_count,
-                    thumbnail_url,
-                    published_time,
-                });
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(Self::classify_http_error(status, &text));
+            }
+
+            let payload: Value = resp.json().await.map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Parsing,
+                message: format!("Malformed playlists response: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
+
+            if let Some(items) = payload.get("items").and_then(|v| v.as_array()) {
+                for item in items {
+                    let pid = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let snippet = item.get("snippet").unwrap_or(&Value::Null);
+                    let priv_str = item
+                        .pointer("/status/privacyStatus")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("private");
+                    let count = item
+                        .pointer("/contentDetails/itemCount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+
+                    playlists.push(PlaylistItem {
+                        playlist_id: pid,
+                        title: snippet
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Untitled Playlist")
+                            .to_string(),
+                        description: snippet
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        item_count: count,
+                        thumbnail_url: snippet
+                            .pointer("/thumbnails/high/url")
+                            .or_else(|| snippet.pointer("/thumbnails/medium/url"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                        privacy_status: PlaylistPrivacy::from_api_str(priv_str),
+                        is_owned: true,
+                        synced_at: Utc::now().timestamp(),
+                    });
+                }
+            }
+
+            page_token = payload
+                .get("nextPageToken")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if page_token.is_none() {
+                break;
             }
         }
 
-        Ok(results)
-    }
-
-    pub async fn set_video_rating(&self, access_token: &str, video_id: &str, rating: &str) -> Result<()> {
-        let url = format!("{}/videos/rate?id={}&rating={}", self.base_url, video_id, rating);
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(access_token)
-            .header("Content-Length", 0)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!("Failed to rate video: {}", resp.status()));
-        }
-        Ok(())
+        Ok(playlists)
     }
 
     pub async fn create_playlist(
@@ -318,55 +519,134 @@ impl YouTubeApiClient {
         access_token: &str,
         title: &str,
         description: &str,
-        is_private: bool,
-    ) -> Result<PlaylistItem> {
-        let url = format!("{}/playlists?part=snippet,status", self.base_url);
-        let privacy_status = if is_private { "private" } else { "public" };
-        let body = serde_json::json!({
+        privacy: PlaylistPrivacy,
+    ) -> Result<PlaylistItem, ClassifiedError> {
+        let body = json!({
             "snippet": {
                 "title": title,
-                "description": description,
+                "description": description
             },
             "status": {
-                "privacyStatus": privacy_status
+                "privacyStatus": privacy.as_api_str()
             }
         });
 
         let resp = self
-            .client
-            .post(&url)
+            .http
+            .post(format!("{}/playlists", YT_API_BASE))
             .bearer_auth(access_token)
+            .query(&[("part", "snippet,status,contentDetails")])
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Network error creating playlist: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("Failed to create playlist: {}", resp.status()));
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
         }
 
-        let json: Value = resp.json().await?;
-        let id = json["id"].as_str().unwrap_or_default().to_string();
-        let snippet = &json["snippet"];
-        let res_title = snippet["title"].as_str().unwrap_or(title).to_string();
-        let res_desc = snippet["description"].as_str().unwrap_or(description).to_string();
+        let item: Value = resp.json().await.map_err(|e| ClassifiedError {
+            kind: SyncErrorKind::Parsing,
+            message: format!("Failed to parse created playlist: {}", e),
+            occurred_at: Utc::now().timestamp(),
+        })?;
 
         Ok(PlaylistItem {
-            id,
-            title: res_title,
-            description: res_desc,
-            video_count: 0,
+            playlist_id: item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            title: title.to_string(),
+            description: description.to_string(),
+            item_count: 0,
             thumbnail_url: String::new(),
+            privacy_status: privacy,
+            is_owned: true,
+            synced_at: Utc::now().timestamp(),
         })
     }
 
-    pub async fn insert_playlist_item(
+    pub async fn update_playlist(
+        &self,
+        access_token: &str,
+        playlist_id: &str,
+        title: &str,
+        description: &str,
+        privacy: PlaylistPrivacy,
+    ) -> Result<(), ClassifiedError> {
+        let body = json!({
+            "id": playlist_id,
+            "snippet": {
+                "title": title,
+                "description": description
+            },
+            "status": {
+                "privacyStatus": privacy.as_api_str()
+            }
+        });
+
+        let resp = self
+            .http
+            .put(format!("{}/playlists", YT_API_BASE))
+            .bearer_auth(access_token)
+            .query(&[("part", "snippet,status")])
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Network error updating playlist: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
+        }
+        Ok(())
+    }
+
+    pub async fn delete_playlist(
+        &self,
+        access_token: &str,
+        playlist_id: &str,
+    ) -> Result<(), ClassifiedError> {
+        let resp = self
+            .http
+            .delete(format!("{}/playlists", YT_API_BASE))
+            .bearer_auth(access_token)
+            .query(&[("id", playlist_id)])
+            .send()
+            .await
+            .map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Network error deleting playlist: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
+        }
+        Ok(())
+    }
+
+    pub async fn add_video_to_playlist(
         &self,
         access_token: &str,
         playlist_id: &str,
         video_id: &str,
-    ) -> Result<String> {
-        let url = format!("{}/playlistItems?part=snippet", self.base_url);
-        let body = serde_json::json!({
+    ) -> Result<String, ClassifiedError> {
+        let body = json!({
             "snippet": {
                 "playlistId": playlist_id,
                 "resourceId": {
@@ -377,233 +657,157 @@ impl YouTubeApiClient {
         });
 
         let resp = self
-            .client
-            .post(&url)
+            .http
+            .post(format!("{}/playlistItems", YT_API_BASE))
             .bearer_auth(access_token)
+            .query(&[("part", "snippet")])
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Network error adding video to playlist: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("Failed to add video to playlist: {}", resp.status()));
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
         }
 
-        let json: Value = resp.json().await?;
-        let item_id = json["id"].as_str().unwrap_or_default().to_string();
-        Ok(item_id)
-    }
+        let val: Value = resp.json().await.map_err(|e| ClassifiedError {
+            kind: SyncErrorKind::Parsing,
+            message: format!("Failed to parse playlistItem response: {}", e),
+            occurred_at: Utc::now().timestamp(),
+        })?;
 
-    pub async fn delete_playlist_item(&self, access_token: &str, playlist_item_id: &str) -> Result<()> {
-        let url = format!("{}/playlistItems?id={}", self.base_url, playlist_item_id);
-        let resp = self
-            .client
-            .delete(&url)
-            .bearer_auth(access_token)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!("Failed to remove playlist item: {}", resp.status()));
-        }
-        Ok(())
-    }
-
-    pub async fn subscribe_channel(&self, access_token: &str, channel_id: &str) -> Result<()> {
-        let url = format!("{}/subscriptions?part=snippet", self.base_url);
-        let body = serde_json::json!({
-            "snippet": {
-                "resourceId": {
-                    "kind": "youtube#channel",
-                    "channelId": channel_id
-                }
-            }
-        });
-
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(access_token)
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!("Failed to subscribe to channel: {}", resp.status()));
-        }
-        Ok(())
-    }
-
-    pub async fn unsubscribe_channel(&self, access_token: &str, subscription_id: &str) -> Result<()> {
-        let url = format!("{}/subscriptions?id={}", self.base_url, subscription_id);
-        let resp = self
-            .client
-            .delete(&url)
-            .bearer_auth(access_token)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(anyhow!("Failed to unsubscribe from channel: {}", resp.status()));
-        }
-        Ok(())
-    }
-
-    pub async fn get_channel_detail(
-        &self,
-        access_token: Option<&str>,
-        channel_id: &str,
-    ) -> Result<rusttube_core::models::ChannelDetail> {
-        let url = format!(
-            "{}/channels?part=snippet,contentDetails,statistics,brandingSettings&id={}",
-            self.base_url, channel_id
-        );
-        let mut req = self.client.get(&url);
-        if let Some(token) = access_token {
-            req = req.bearer_auth(token);
-        }
-
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("YouTube API channel error: {}", resp.status()));
-        }
-
-        let json: Value = resp.json().await?;
-        let item = json["items"]
-            .as_array()
-            .and_then(|a| a.first())
-            .ok_or_else(|| anyhow!("Channel {} not found", channel_id))?;
-
-        let snippet = &item["snippet"];
-        let stats = &item["statistics"];
-        let content_details = &item["contentDetails"];
-        let branding = &item["brandingSettings"];
-
-        let title = snippet["title"].as_str().unwrap_or("YouTube Channel").to_string();
-        let description = snippet["description"].as_str().unwrap_or_default().to_string();
-        let avatar_url = snippet["thumbnails"]["high"]["url"]
-            .as_str()
-            .or_else(|| snippet["thumbnails"]["default"]["url"].as_str())
+        Ok(val
+            .get("id")
+            .and_then(|v| v.as_str())
             .unwrap_or_default()
-            .to_string();
-        let banner_url = branding["image"]["bannerExternalUrl"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-
-        let sub_count = stats["subscriberCount"]
-            .as_str()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-        let video_count = stats["videoCount"]
-            .as_str()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
-
-        let uploads_playlist_id = content_details["relatedPlaylists"]["uploads"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-
-        let subscriber_text = if sub_count >= 1_000_000 {
-            format!("{:.1}M subscribers", sub_count as f64 / 1_000_000.0)
-        } else if sub_count >= 1_000 {
-            format!("{:.1}K subscribers", sub_count as f64 / 1_000.0)
-        } else if sub_count > 0 {
-            format!("{} subscribers", sub_count)
-        } else {
-            "Subscribers hidden".to_string()
-        };
-
-        Ok(rusttube_core::models::ChannelDetail {
-            item: ChannelItem {
-                id: channel_id.to_string(),
-                title,
-                description,
-                subscriber_count: sub_count,
-                avatar_url,
-            },
-            uploads_playlist_id,
-            banner_url,
-            subscriber_text,
-            video_count,
-        })
+            .to_string())
     }
 
-    pub async fn get_personalized_feed(&self, access_token: &str) -> Result<Vec<VideoItem>> {
-        let (subs, _) = self.get_subscriptions(access_token, None).await?;
-        let mut feed_videos = Vec::new();
-
-        // Fetch recent uploads for top subscribed channels
-        for ch in subs.iter().take(8) {
-            if let Ok(ch_detail) = self.get_channel_detail(Some(access_token), &ch.id).await {
-                if !ch_detail.uploads_playlist_id.is_empty() {
-                    if let Ok(items) = self.get_playlist_items(access_token, &ch_detail.uploads_playlist_id).await {
-                        feed_videos.extend(items);
-                    }
-                }
-            }
-        }
-
-        // Deduplicate and sort by publication time if available
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-
-        for item in feed_videos {
-            if !item.id.is_empty() && seen.insert(item.id.clone()) {
-                result.push(item);
-            }
-        }
-
-        Ok(result)
-    }
-
-    pub async fn update_playlist(
+    pub async fn remove_video_from_playlist(
         &self,
         access_token: &str,
-        playlist_id: &str,
-        title: &str,
-        description: &str,
-        is_private: bool,
-    ) -> Result<()> {
-        let url = format!("{}/playlists?part=snippet,status", self.base_url);
-        let privacy_status = if is_private { "private" } else { "public" };
-        let body = serde_json::json!({
-            "id": playlist_id,
-            "snippet": {
-                "title": title,
-                "description": description
-            },
-            "status": {
-                "privacyStatus": privacy_status
-            }
-        });
-
+        playlist_item_id: &str,
+    ) -> Result<(), ClassifiedError> {
         let resp = self
-            .client
-            .put(&url)
+            .http
+            .delete(format!("{}/playlistItems", YT_API_BASE))
             .bearer_auth(access_token)
-            .json(&body)
+            .query(&[("id", playlist_item_id)])
             .send()
-            .await?;
+            .await
+            .map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Network error removing video from playlist: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("Failed to update playlist: {}", resp.status()));
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
         }
         Ok(())
     }
 
-    pub async fn delete_playlist(&self, access_token: &str, playlist_id: &str) -> Result<()> {
-        let url = format!("{}/playlists?id={}", self.base_url, playlist_id);
+    pub async fn rate_video(
+        &self,
+        access_token: &str,
+        video_id: &str,
+        rating: VideoRating,
+    ) -> Result<(), ClassifiedError> {
+        let rating_str = match rating {
+            VideoRating::Like => "like",
+            VideoRating::None => "none",
+        };
+
         let resp = self
-            .client
-            .delete(&url)
+            .http
+            .post(format!("{}/videos/rate", YT_API_BASE))
             .bearer_auth(access_token)
+            .query(&[("id", video_id), ("rating", rating_str)])
             .send()
-            .await?;
+            .await
+            .map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Network error rating video: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("Failed to delete playlist: {}", resp.status()));
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_classification_separates_auth_quota_and_scope() {
+        let auth_err = YouTubeApiClient::classify_http_error(StatusCode::UNAUTHORIZED, "Invalid Credentials");
+        assert_eq!(auth_err.kind, SyncErrorKind::Authentication);
+
+        let quota_err = YouTubeApiClient::classify_http_error(
+            StatusCode::FORBIDDEN,
+            r#"{"error":{"errors":[{"reason":"quotaExceeded"}]}}"#,
+        );
+        assert_eq!(quota_err.kind, SyncErrorKind::QuotaExceeded);
+
+        let scope_err = YouTubeApiClient::classify_http_error(
+            StatusCode::FORBIDDEN,
+            r#"{"error":{"errors":[{"reason":"insufficientPermissions"}]}}"#,
+        );
+        assert_eq!(scope_err.kind, SyncErrorKind::AuthorizationScope);
+    }
+
+    #[test]
+    fn test_playlist_items_handles_private_and_deleted_videos() {
+        let raw = json!({
+            "items": [
+                {
+                    "id": "PLI_1",
+                    "snippet": {
+                        "title": "Private video",
+                        "position": 0,
+                        "resourceId": { "videoId": "priv1234567" }
+                    },
+                    "status": { "privacyStatus": "private" }
+                },
+                {
+                    "id": "PLI_2",
+                    "snippet": {
+                        "title": "Deleted video",
+                        "position": 1,
+                        "resourceId": { "videoId": "del12345678" }
+                    },
+                    "status": { "privacyStatus": "public" }
+                },
+                {
+                    "id": "PLI_3",
+                    "snippet": {
+                        "title": "Rust 2021 Systems Programming",
+                        "position": 2,
+                        "resourceId": { "videoId": "ok123456789" }
+                    },
+                    "status": { "privacyStatus": "public" }
+                }
+            ]
+        });
+
+        let parsed = YouTubeApiClient::parse_playlist_items_payload("PL_TEST", &raw);
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].availability_status, VideoAvailability::Private);
+        assert_eq!(parsed[1].availability_status, VideoAvailability::Deleted);
+        assert_eq!(parsed[2].availability_status, VideoAvailability::Available);
     }
 }
