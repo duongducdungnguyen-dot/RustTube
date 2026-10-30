@@ -1,0 +1,33 @@
+[app]
+theme = "dark"
+window_width = 1380
+window_height = 860
+startup_page = "home"
+auto_refresh_subscriptions = true
+
+[player]
+hwdec = "auto-safe"
+preferred_quality = "1080p"
+volume = 80
+speed = 1.0
+subtitles_enabled = false
+audio_device = "auto"
+cache_seconds = 30
+
+[ytdlp]
+binary_path = "bin/yt-dlp.exe"
+cookies_browser = "chrome" # options: "none", "chrome", "edge", "firefox"
+auto_update_check = true
+max_search_results = 24
+
+[auth]
+google_client_id = "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
+redirect_port = 8989
+keyring_service_name = "RustTube_Google_OAuth"
+
+[cache]
+disk_cache_mb = 512
+thumbnail_dir = "cache/thumbnails"
+persist_history = true
+persist_watch_later = true
+max_history_items = 500

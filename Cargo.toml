@@ -1,0 +1,43 @@
+[workspace]
+members = [
+    "crates/app",
+    "crates/core",
+    "crates/player",
+    "crates/ytdlp",
+    "crates/auth",
+    "crates/api",
+    "crates/cache",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Personal User"]
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+slint = { version = "1.9", features = ["renderer-femtovg"] }
+slint-build = "1.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+oauth2 = "4.4"
+keyring = { version = "3.6", features = ["windows-native"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+dirs = "6.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+url = "2.5"
+anyhow = "1.0"
+thiserror = "2.0"
+libloading = "0.8"
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_Graphics_Gdi"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+strip = true

@@ -1,0 +1,6 @@
+{
+  "name": "RustTube",
+  "description": "High-performance native Windows 11 personal YouTube desktop client built in Rust with Slint UI, libmpv, yt-dlp, and Google OAuth2.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

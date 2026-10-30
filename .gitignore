@@ -1,0 +1,23 @@
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# User configuration and tokens
+config.toml
+*.token
+*.cookie
+
+# Binaries and libraries
+/bin/*.exe
+/bin/*.dll
+/bin/*.lib
+
+# Local cache & logs
+/cache/
+*.log
+
+# Node dependencies (web companion)
+node_modules/
+dist/
+.env
+.env.local

@@ -1,0 +1,298 @@
+use anyhow::{anyhow, Result};
+use reqwest::Client;
+use rusttube_core::models::{ChannelItem, PlaylistItem, VideoItem};
+use serde_json::Value;
+
+pub struct YouTubeApiClient {
+    client: Client,
+    base_url: &'static str,
+}
+
+impl Default for YouTubeApiClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl YouTubeApiClient {
+    pub fn new() -> Self {
+        Self {
+            client: Client::builder().build().unwrap_or_default(),
+            base_url: "https://www.googleapis.com/youtube/v3",
+        }
+    }
+
+    pub async fn get_my_channel(&self, access_token: &str) -> Result<(String, String)> {
+        let url = format!("{}/channels?part=snippet&mine=true", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("YouTube API channels error: {}", resp.status()));
+        }
+
+        let json: Value = resp.json().await?;
+        let item = json["items"]
+            .as_array()
+            .and_then(|a| a.first())
+            .ok_or_else(|| anyhow!("No channel found for authenticated account"))?;
+
+        let title = item["snippet"]["title"]
+            .as_str()
+            .unwrap_or("Personal User")
+            .to_string();
+        let custom_url = item["snippet"]["customUrl"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        Ok((title, custom_url))
+    }
+
+    pub async fn get_subscriptions(&self, access_token: &str) -> Result<Vec<ChannelItem>> {
+        let url = format!(
+            "{}/subscriptions?part=snippet&mine=true&maxResults=50&order=alphabetical",
+            self.base_url
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("YouTube API subscriptions error: {}", resp.status()));
+        }
+
+        let json: Value = resp.json().await?;
+        let mut results = Vec::new();
+
+        if let Some(items) = json["items"].as_array() {
+            for item in items {
+                let snippet = &item["snippet"];
+                let id = snippet["resourceId"]["channelId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let title = snippet["title"].as_str().unwrap_or_default().to_string();
+                let description = snippet["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let avatar_url = snippet["thumbnails"]["default"]["url"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+
+                results.push(ChannelItem {
+                    id,
+                    title,
+                    description,
+                    subscriber_count: 0,
+                    avatar_url,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub async fn get_playlists(&self, access_token: &str) -> Result<Vec<PlaylistItem>> {
+        let url = format!(
+            "{}/playlists?part=snippet,contentDetails&mine=true&maxResults=50",
+            self.base_url
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("YouTube API playlists error: {}", resp.status()));
+        }
+
+        let json: Value = resp.json().await?;
+        let mut results = Vec::new();
+
+        if let Some(items) = json["items"].as_array() {
+            for item in items {
+                let id = item["id"].as_str().unwrap_or_default().to_string();
+                let snippet = &item["snippet"];
+                let title = snippet["title"].as_str().unwrap_or_default().to_string();
+                let description = snippet["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let video_count = item["contentDetails"]["itemCount"]
+                    .as_u64()
+                    .unwrap_or(0) as u32;
+                let thumbnail_url = snippet["thumbnails"]["medium"]["url"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+
+                results.push(PlaylistItem {
+                    id,
+                    title,
+                    description,
+                    video_count,
+                    thumbnail_url,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub async fn get_playlist_items(
+        &self,
+        access_token: &str,
+        playlist_id: &str,
+    ) -> Result<Vec<VideoItem>> {
+        let url = format!(
+            "{}/playlistItems?part=snippet,contentDetails&playlistId={}&maxResults=50",
+            self.base_url, playlist_id
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("YouTube API playlistItems error: {}", resp.status()));
+        }
+
+        let json: Value = resp.json().await?;
+        let mut results = Vec::new();
+
+        if let Some(items) = json["items"].as_array() {
+            for item in items {
+                let snippet = &item["snippet"];
+                let video_id = snippet["resourceId"]["videoId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let title = snippet["title"].as_str().unwrap_or_default().to_string();
+                let channel_name = snippet["videoOwnerChannelTitle"]
+                    .as_str()
+                    .unwrap_or("Unknown")
+                    .to_string();
+                let channel_id = snippet["videoOwnerChannelId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let thumbnail_url = snippet["thumbnails"]["high"]["url"]
+                    .as_str()
+                    .or_else(|| snippet["thumbnails"]["medium"]["url"].as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let published_time = snippet["publishedAt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+
+                results.push(VideoItem {
+                    id: video_id,
+                    title,
+                    channel_name,
+                    channel_id,
+                    duration_seconds: 0,
+                    duration_string: "--:--".to_string(),
+                    view_count: 0,
+                    thumbnail_url,
+                    published_time,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub async fn get_liked_videos(&self, access_token: &str) -> Result<Vec<VideoItem>> {
+        let url = format!(
+            "{}/videos?part=snippet,contentDetails,statistics&myRating=like&maxResults=50",
+            self.base_url
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("YouTube API liked videos error: {}", resp.status()));
+        }
+
+        let json: Value = resp.json().await?;
+        let mut results = Vec::new();
+
+        if let Some(items) = json["items"].as_array() {
+            for item in items {
+                let id = item["id"].as_str().unwrap_or_default().to_string();
+                let snippet = &item["snippet"];
+                let title = snippet["title"].as_str().unwrap_or_default().to_string();
+                let channel_name = snippet["channelTitle"]
+                    .as_str()
+                    .unwrap_or("Unknown")
+                    .to_string();
+                let channel_id = snippet["channelId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let thumbnail_url = snippet["thumbnails"]["high"]["url"]
+                    .as_str()
+                    .or_else(|| snippet["thumbnails"]["medium"]["url"].as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let view_count = item["statistics"]["viewCount"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let published_time = snippet["publishedAt"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+
+                results.push(VideoItem {
+                    id,
+                    title,
+                    channel_name,
+                    channel_id,
+                    duration_seconds: 0,
+                    duration_string: "--:--".to_string(),
+                    view_count,
+                    thumbnail_url,
+                    published_time,
+                });
+            }
+        }
+
+        Ok(results)
+    }
+
+    pub async fn set_video_rating(&self, access_token: &str, video_id: &str, rating: &str) -> Result<()> {
+        let url = format!("{}/videos/rate?id={}&rating={}", self.base_url, video_id, rating);
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(access_token)
+            .header("Content-Length", 0)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("Failed to rate video: {}", resp.status()));
+        }
+        Ok(())
+    }
+}

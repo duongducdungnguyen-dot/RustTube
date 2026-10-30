@@ -1,0 +1,474 @@
+import { Button, VerticalBox, HorizontalBox, ScrollView, Slider, LineEdit } from "std-widgets.slint";
+
+export struct VideoCardData {
+    id: string,
+    title: string,
+    channel: string,
+    duration: string,
+    views: string,
+    thumbnail_url: string,
+}
+
+export struct ChannelCardData {
+    id: string,
+    title: string,
+    avatar_url: string,
+}
+
+export struct PlaylistCardData {
+    id: string,
+    title: string,
+    video_count: int,
+}
+
+component VideoCard inherits Rectangle {
+    in property <VideoCardData> data;
+    callback clicked();
+    callback watch_later_clicked();
+
+    background: #16171d;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #242531;
+
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        // Thumbnail container
+        Rectangle {
+            height: 140px;
+            background: #20222e;
+            border-radius: 6px;
+            clip: true;
+
+            // Duration badge
+            Rectangle {
+                x: parent.width - self.width - 6px;
+                y: parent.height - self.height - 6px;
+                width: dur_txt.preferred-width + 8px;
+                height: 18px;
+                background: #000000cc;
+                border-radius: 4px;
+
+                dur_txt := Text {
+                    text: root.data.duration;
+                    color: #ffffff;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+
+        // Title and channel info
+        Text {
+            text: root.data.title;
+            color: #f0f0f5;
+            font-size: 13px;
+            font-weight: 600;
+            overflow: elide;
+            max-height: 36px;
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: root.data.channel;
+                color: #a0a0b2;
+                font-size: 11px;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.data.views;
+                color: #7b7b90;
+                font-size: 11px;
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "RustTube";
+    preferred-width: 1380px;
+    preferred-height: 860px;
+    background: #0f0f12;
+
+    in-out property <string> current_page: "home";
+    in-out property <string> search_query: "";
+    in-out property <string> current_video_id: "";
+    in-out property <string> current_video_title: "";
+    in-out property <bool> is_playing: false;
+    in-out property <float> playback_position: 0.0;
+    in-out property <float> playback_duration: 100.0;
+    in-out property <string> time_display: "0:00 / 0:00";
+    in-out property <int> volume_val: 80;
+    in-out property <string> user_display_name: "Sign In";
+    in-out property <bool> is_logged_in: false;
+    in-out property <string> ytdlp_version: "yt-dlp latest";
+    in-out property <string> notification_text: "";
+    in-out property <[VideoCardData]> video_list: [];
+    in-out property <[ChannelCardData]> channel_list: [];
+    in-out property <[PlaylistCardData]> playlist_list: [];
+
+    callback navigate(string);
+    callback search_submitted(string);
+    callback video_selected(string, string);
+    callback toggle_play_pause();
+    callback seek_requested(float);
+    callback volume_changed(int);
+    callback speed_changed(float);
+    callback quality_changed(string);
+    callback toggle_fullscreen();
+    callback toggle_subtitles();
+    callback toggle_like(string);
+    callback toggle_watch_later(string);
+    callback login_google();
+    callback logout_google();
+    callback check_ytdlp_update();
+    callback clear_history();
+
+    HorizontalLayout {
+        // Sidebar Navigation
+        Rectangle {
+            width: 210px;
+            background: #141419;
+            border-color: #20212a;
+            border-width: 1px;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                // Logo Brand
+                HorizontalLayout {
+                    spacing: 8px;
+                    Rectangle {
+                        width: 28px;
+                        height: 20px;
+                        background: #ff0033;
+                        border-radius: 4px;
+                        Text {
+                            text: "▶";
+                            color: #ffffff;
+                            font-size: 11px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: "RustTube";
+                        color: #ffffff;
+                        font-size: 18px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Rectangle { height: 12px; }
+
+                // Navigation Buttons
+                Button {
+                    text: "🏠  Home";
+                    clicked => { root.navigate("home"); }
+                }
+                Button {
+                    text: "📺  Subscriptions";
+                    clicked => { root.navigate("subscriptions"); }
+                }
+                Button {
+                    text: "📑  Playlists";
+                    clicked => { root.navigate("playlists"); }
+                }
+                Button {
+                    text: "⏱️  Watch Later";
+                    clicked => { root.navigate("watch_later"); }
+                }
+                Button {
+                    text: "📜  History";
+                    clicked => { root.navigate("history"); }
+                }
+
+                Rectangle { vertical-stretch: 1; }
+
+                // Settings & Account
+                Button {
+                    text: "⚙️  Settings";
+                    clicked => { root.navigate("settings"); }
+                }
+            }
+        }
+
+        // Main Content Area
+        VerticalLayout {
+            // Top Header Bar
+            Rectangle {
+                height: 58px;
+                background: #121317;
+                border-color: #20212a;
+                border-width: 1px;
+
+                HorizontalLayout {
+                    padding: 10px;
+                    padding-left: 20px;
+                    padding-right: 20px;
+                    spacing: 16px;
+
+                    // Search input
+                    search_input := LineEdit {
+                        placeholder-text: "Search YouTube videos (Press Enter)...";
+                        horizontal-stretch: 1;
+                        accepted => {
+                            root.search_submitted(self.text);
+                        }
+                    }
+
+                    Button {
+                        text: "🔍 Search";
+                        clicked => {
+                            root.search_submitted(search_input.text);
+                        }
+                    }
+
+                    Rectangle { width: 10px; }
+
+                    // Auth badge button
+                    Button {
+                        text: root.is_logged_in ? "👤 " + root.user_display_name : "🔑 Sign In";
+                        clicked => {
+                            if (root.is_logged_in) {
+                                root.logout_google();
+                            } else {
+                                root.login_google();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Body Area (Grid or Player or Settings)
+            Rectangle {
+                vertical-stretch: 1;
+                background: #0a0a0d;
+
+                // Video Grid ScrollView
+                if root.current_page != "settings": ScrollView {
+                    viewport-width: parent.width;
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: 16px;
+
+                        // Notification Banner if present
+                        if root.notification_text != "": Rectangle {
+                            height: 36px;
+                            background: #1e2238;
+                            border-radius: 6px;
+                            border-color: #3b426f;
+                            border-width: 1px;
+                            Text {
+                                text: root.notification_text;
+                                color: #8ab4f8;
+                                font-size: 13px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        // Video Grid
+                        GridLayout {
+                            spacing: 16px;
+                            for video[i] in root.video_list: VideoCard {
+                                col: mod(i, 3);
+                                row: floor(i / 3);
+                                width: 340px;
+                                height: 220px;
+                                data: video;
+                                clicked => {
+                                    root.video_selected(video.id, video.title);
+                                }
+                                watch_later_clicked => {
+                                    root.toggle_watch_later(video.id);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Settings Page
+                if root.current_page == "settings": VerticalLayout {
+                    padding: 30px;
+                    spacing: 16px;
+
+                    Text {
+                        text: "RustTube Settings";
+                        color: #ffffff;
+                        font-size: 22px;
+                        font-weight: 700;
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: #242531;
+                    }
+
+                    Text {
+                        text: "Google Account & YouTube API";
+                        color: #ffffff;
+                        font-size: 15px;
+                        font-weight: 600;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Button {
+                            text: root.is_logged_in ? "Disconnect Account" : "Connect Google Account (OAuth2 PKCE)";
+                            clicked => {
+                                if (root.is_logged_in) {
+                                    root.logout_google();
+                                } else {
+                                    root.login_google();
+                                }
+                            }
+                        }
+                        Text {
+                            text: root.is_logged_in ? "Connected: " + root.user_display_name : "Not connected (Using public mode)";
+                            color: #a0a0b2;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Rectangle { height: 10px; }
+
+                    Text {
+                        text: "yt-dlp Extraction Engine";
+                        color: #ffffff;
+                        font-size: 15px;
+                        font-weight: 600;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: root.ytdlp_version;
+                            color: #a0a0b2;
+                            vertical-alignment: center;
+                        }
+                        Button {
+                            text: "Check & Update yt-dlp";
+                            clicked => {
+                                root.check_ytdlp_update();
+                            }
+                        }
+                    }
+
+                    Rectangle { height: 10px; }
+
+                    Text {
+                        text: "Local Cache & History";
+                        color: #ffffff;
+                        font-size: 15px;
+                        font-weight: 600;
+                    }
+
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Button {
+                            text: "Clear Watch History";
+                            clicked => {
+                                root.clear_history();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Embedded Video Player Bottom Bar / HUD
+            if root.current_video_id != "": Rectangle {
+                height: 72px;
+                background: #14151b;
+                border-color: #242531;
+                border-width: 1px;
+
+                VerticalLayout {
+                    padding: 8px;
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 4px;
+
+                    // Progress timeline slider
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Slider {
+                            minimum: 0.0;
+                            maximum: root.playback_duration;
+                            value: root.playback_position;
+                            changed(val) => {
+                                root.seek_requested(val);
+                            }
+                        }
+                        Text {
+                            text: root.time_display;
+                            color: #a0a0b2;
+                            font-size: 11px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    // Playback Controls
+                    HorizontalLayout {
+                        spacing: 12px;
+
+                        Button {
+                            text: root.is_playing ? "⏸ Pause (Space)" : "▶ Play (Space)";
+                            clicked => { root.toggle_play_pause(); }
+                        }
+
+                        Button {
+                            text: "⏪ 10s (J)";
+                            clicked => { root.seek_requested(root.playback_position - 10.0); }
+                        }
+
+                        Button {
+                            text: "⏩ 10s (L)";
+                            clicked => { root.seek_requested(root.playback_position + 10.0); }
+                        }
+
+                        Text {
+                            text: root.current_video_title;
+                            color: #ffffff;
+                            font-size: 12px;
+                            font-weight: 600;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        // Quality selector button
+                        Button {
+                            text: "1080p ⚙️";
+                            clicked => { root.quality_changed("1080p"); }
+                        }
+
+                        // Speed selector button
+                        Button {
+                            text: "1.0x ⚡";
+                            clicked => { root.speed_changed(1.0); }
+                        }
+
+                        // Fullscreen
+                        Button {
+                            text: "⛶ Fullscreen (F)";
+                            clicked => { root.toggle_fullscreen(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
