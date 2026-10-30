@@ -34,6 +34,14 @@ impl HistoryStore {
     }
 
     pub async fn get_all(&self) -> Vec<VideoItem> {
+        if self.file_path.exists() {
+            if let Ok(content) = tokio::fs::read_to_string(&self.file_path).await {
+                if let Ok(disk_items) = serde_json::from_str::<Vec<VideoItem>>(&content) {
+                    let mut lock = self.items.lock().await;
+                    *lock = disk_items;
+                }
+            }
+        }
         self.items.lock().await.clone()
     }
 

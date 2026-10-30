@@ -3,13 +3,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VideoItem {
     pub id: String,
+    #[serde(default)]
     pub title: String,
+    #[serde(alias = "channel", default)]
     pub channel_name: String,
+    #[serde(default)]
     pub channel_id: String,
+    #[serde(alias = "durationSeconds", default)]
     pub duration_seconds: u32,
+    #[serde(alias = "duration", default)]
     pub duration_string: String,
+    #[serde(default)]
     pub view_count: u64,
+    #[serde(alias = "thumbnail", default)]
     pub thumbnail_url: String,
+    #[serde(alias = "published", default)]
     pub published_time: String,
 }
 

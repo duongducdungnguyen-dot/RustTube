@@ -97,6 +97,15 @@ export default function App() {
     setTimeout(() => setNotification(''), 3000);
   };
 
+  const deduplicateVideos = (list: VideoItem[]): VideoItem[] => {
+    const seen = new Set<string>();
+    return list.filter(item => {
+      if (!item || !item.id || seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
+  };
+
   // Load Initial Feed
   const fetchFeed = useCallback(async () => {
     setIsLoading(true);
@@ -106,7 +115,7 @@ export default function App() {
       if (!res.ok) throw new Error(`Feed request failed (${res.status})`);
       const data = await res.json();
       if (Array.isArray(data.videos)) {
-        setVideos(data.videos);
+        setVideos(deduplicateVideos(data.videos));
       }
     } catch (err: any) {
       console.error(err);
@@ -122,7 +131,7 @@ export default function App() {
       const res = await fetch('/api/watch_later');
       if (res.ok) {
         const data = await res.json();
-        setWatchLaterList(data.watchLater || []);
+        setWatchLaterList(deduplicateVideos(data.watchLater || []));
       }
     } catch {}
   };
@@ -133,7 +142,7 @@ export default function App() {
       const res = await fetch('/api/history');
       if (res.ok) {
         const data = await res.json();
-        setHistoryList(data.history || []);
+        setHistoryList(deduplicateVideos(data.history || []));
       }
     } catch {}
   };
@@ -173,7 +182,7 @@ export default function App() {
       if (!res.ok) throw new Error(`Search failed (${res.status})`);
       const data = await res.json();
       if (Array.isArray(data.videos) && data.videos.length > 0) {
-        setVideos(data.videos);
+        setVideos(deduplicateVideos(data.videos));
       } else {
         setVideos([]);
       }
@@ -626,9 +635,9 @@ export default function App() {
                       {videos
                         .filter(v => v.id !== selectedVideo.id)
                         .slice(0, 8)
-                        .map(item => (
+                        .map((item, idx) => (
                           <div
-                            key={item.id}
+                            key={`related-${item.id}-${idx}`}
                             onClick={() => handleSelectVideo(item)}
                             className="group cursor-pointer rounded-xl bg-[#12131a] border border-[#1d1f2b] hover:border-[#2d3144] hover:bg-[#151722] overflow-hidden flex flex-col transition-all"
                           >
@@ -856,13 +865,13 @@ export default function App() {
                   ) : (
                     /* Real Video Card Grid */
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                      {currentVideoList.map(video => {
+                      {currentVideoList.map((video, idx) => {
                         const isSelected = selectedVideo?.id === video.id;
                         const inWatchLater = watchLaterList.some(v => v.id === video.id);
 
                         return (
                           <div
-                            key={video.id}
+                            key={`grid-${video.id}-${idx}`}
                             onClick={() => handleSelectVideo(video)}
                             className={`group cursor-pointer rounded-xl bg-[#12131a] border transition-all duration-200 overflow-hidden flex flex-col ${
                               isSelected
@@ -948,50 +957,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Center: Controls */}
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setCurrentTime(t => Math.max(0, t - 10))}
-                    title="Seek backward 10s"
-                    className="p-1.5 rounded-lg text-[#9094a8] hover:text-white hover:bg-[#1a1c26]"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => setIsPlaying(p => !p)}
-                    title={isPlaying ? 'Pause' : 'Play'}
-                    className="p-2 rounded-lg bg-[#ff0033] hover:bg-[#d9002c] text-white shadow"
-                  >
-                    {isPlaying ? <Pause className="w-3.5 h-3.5 fill-white" /> : <Play className="w-3.5 h-3.5 fill-white ml-0.5" />}
-                  </button>
-                  <button
-                    onClick={() => setCurrentTime(t => Math.min(selectedVideo.durationSeconds, t + 10))}
-                    title="Seek forward 10s"
-                    className="p-1.5 rounded-lg text-[#9094a8] hover:text-white hover:bg-[#1a1c26]"
-                  >
-                    <RotateCw className="w-3.5 h-3.5" />
-                  </button>
-
-                  <div className="hidden sm:flex items-center gap-1.5 pl-3 border-l border-[#20222e]">
-                    <button
-                      onClick={() => setIsMuted(m => !m)}
-                      className="p-1 text-[#888c9f] hover:text-white"
-                    >
-                      {isMuted || volume === 0 ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-[#7d8296]" />}
-                    </button>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={isMuted ? 0 : volume}
-                      onChange={e => {
-                        setVolume(Number(e.target.value));
-                        if (isMuted) setIsMuted(false);
-                      }}
-                      className="w-16 h-1 bg-[#232636] accent-[#ff0033] rounded cursor-pointer"
-                    />
-                  </div>
-                </div>
 
                 {/* Right: Expand and Close */}
                 <div className="flex items-center gap-2">

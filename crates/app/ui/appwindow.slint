@@ -113,6 +113,10 @@ export component AppWindow inherits Window {
     in-out property <float> playback_duration: 100.0;
     in-out property <string> time_display: "0:00 / 0:00";
     in-out property <string> user_display_name: "Sign In";
+    in-out property <string> user_email: "";
+    in-out property <string> channel_name: "";
+    in-out property <bool> is_authenticating: false;
+    in-out property <string> auth_state_text: "Signed out";
     in-out property <bool> is_logged_in: false;
     in-out property <string> status_message: "";
     in-out property <[VideoCardData]> video_list: [];
@@ -237,11 +241,12 @@ export component AppWindow inherits Window {
                     Rectangle { width: 8px; }
 
                     Button {
-                        text: root.is_logged_in ? root.user_display_name : "Sign In";
+                        enabled: !root.is_authenticating;
+                        text: root.is_authenticating ? "Authenticating..." : (root.is_logged_in ? root.user_display_name : "Sign In");
                         clicked => {
                             if (root.is_logged_in) {
                                 root.navigate("settings");
-                            } else {
+                            } else if (!root.is_authenticating) {
                                 root.login_google();
                             }
                         }
@@ -570,22 +575,90 @@ export component AppWindow inherits Window {
                         font-weight: 600;
                     }
 
-                    HorizontalLayout {
-                        spacing: 12px;
-                        Button {
-                            text: root.is_logged_in ? "Sign Out" : "Sign In with Google";
-                            clicked => {
-                                if (root.is_logged_in) {
-                                    root.logout_google();
-                                } else {
+                    if root.is_logged_in: VerticalLayout {
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: "Email: ";
+                                color: #8c90a4;
+                                font-size: 13px;
+                            }
+                            Text {
+                                text: root.user_email != "" ? root.user_email : "(Not provided)";
+                                color: #ffffff;
+                                font-size: 13px;
+                                font-weight: 500;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: "YouTube Channel: ";
+                                color: #8c90a4;
+                                font-size: 13px;
+                            }
+                            Text {
+                                text: root.channel_name != "" ? root.channel_name : "(No YouTube channel)";
+                                color: #ffffff;
+                                font-size: 13px;
+                                font-weight: 500;
+                            }
+                        }
+
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: "Status: ";
+                                color: #8c90a4;
+                                font-size: 13px;
+                            }
+                            Text {
+                                text: root.auth_state_text;
+                                color: #8ab4f8;
+                                font-size: 13px;
+                            }
+                        }
+
+                        Rectangle { height: 4px; }
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Button {
+                                enabled: !root.is_authenticating;
+                                text: root.is_authenticating ? "Authenticating..." : "Switch Account";
+                                clicked => {
                                     root.login_google();
                                 }
                             }
+                            Button {
+                                text: "Sign Out";
+                                clicked => {
+                                    root.logout_google();
+                                }
+                            }
                         }
-                        Text {
-                            text: root.is_logged_in ? "Signed in as " + root.user_display_name : "Not signed in";
-                            color: #a0a4b8;
-                            vertical-alignment: center;
+                    }
+
+                    if !root.is_logged_in: VerticalLayout {
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Button {
+                                enabled: !root.is_authenticating;
+                                text: root.is_authenticating ? "Authenticating..." : "Sign In with Google";
+                                clicked => {
+                                    root.login_google();
+                                }
+                            }
+                            Text {
+                                text: root.is_authenticating ? "Waiting for account selection in browser..." : root.auth_state_text;
+                                color: #a0a4b8;
+                                vertical-alignment: center;
+                            }
                         }
                     }
 

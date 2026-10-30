@@ -211,13 +211,30 @@ async fn main() -> Result<()> {
     }
 
     // Startup Authentication Check
-    if let Ok(Some(token)) = auth_manager.get_access_token().await {
+    if let Ok(Some((token, user_info))) = auth_manager.restore_session().await {
+        let win = window_weak.clone();
+        let display_name = if user_info.name.is_empty() {
+            user_info.email.clone()
+        } else {
+            user_info.name.clone()
+        };
+        let email = user_info.email.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(w) = win.upgrade() {
+                w.set_is_logged_in(true);
+                w.set_user_display_name(display_name.into());
+                w.set_user_email(email.into());
+                w.set_auth_state_text("Authenticated".into());
+            }
+        });
+
+        // Load YouTube channel independently without invalidating OAuth if missing
         if let Ok((channel_title, _, _)) = api_client.get_my_channel(&token).await {
             let win = window_weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(w) = win.upgrade() {
-                    w.set_is_logged_in(true);
-                    w.set_user_display_name(channel_title.into());
+                    w.set_channel_name(channel_title.into());
+                    w.set_auth_state_text("Fully connected".into());
                 }
             });
         }
@@ -564,6 +581,16 @@ async fn main() -> Result<()> {
                 }
 
                 UiCommand::StartGoogleLogin => {
+                    if worker_auth.is_authenticating() {
+                        let win = worker_window.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(w) = win.upgrade() {
+                                w.set_status_message("Authentication already in progress...".into());
+                            }
+                        });
+                        continue;
+                    }
+
                     let auth = worker_auth.clone();
                     let api = worker_api.clone();
                     let win = worker_window.clone();
@@ -571,29 +598,52 @@ async fn main() -> Result<()> {
                         let win1 = win.clone();
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(w) = win1.upgrade() {
-                                w.set_status_message("Waiting for browser authorization...".into());
+                                w.set_is_authenticating(true);
+                                w.set_auth_state_text("Waiting for account selection in browser...".into());
+                                w.set_status_message("Opening Google sign-in in browser...".into());
                             }
                         });
 
                         match auth.start_oauth_flow().await {
-                            Ok(token) => {
+                            Ok((token, user_info)) => {
+                                let win2 = win.clone();
+                                let display_name = if user_info.name.is_empty() {
+                                    user_info.email.clone()
+                                } else {
+                                    user_info.name.clone()
+                                };
+                                let email = user_info.email.clone();
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(w) = win2.upgrade() {
+                                        w.set_is_authenticating(false);
+                                        w.set_is_logged_in(true);
+                                        w.set_user_display_name(display_name.into());
+                                        w.set_user_email(email.into());
+                                        w.set_auth_state_text("Google authenticated".into());
+                                        w.set_status_message("Signed in with Google. Loading YouTube channel...".into());
+                                    }
+                                });
+
+                                // Fetch YouTube channel separately so failure does not invalidate OAuth
                                 match api.get_my_channel(&token).await {
-                                    Ok((title, _, _)) => {
-                                        let win2 = win.clone();
+                                    Ok((channel_title, _, _)) => {
+                                        let win3 = win.clone();
                                         let _ = slint::invoke_from_event_loop(move || {
-                                            if let Some(w) = win2.upgrade() {
-                                                w.set_is_logged_in(true);
-                                                w.set_user_display_name(title.into());
-                                                w.set_status_message("Signed in successfully.".into());
+                                            if let Some(w) = win3.upgrade() {
+                                                w.set_channel_name(channel_title.into());
+                                                w.set_auth_state_text("Fully connected".into());
+                                                w.set_status_message("YouTube account connected successfully.".into());
                                             }
                                         });
                                     }
                                     Err(e) => {
-                                        let win2 = win.clone();
-                                        let err_msg = format!("Authenticated, but could not load YouTube channel: {}", e);
+                                        warn!("Could not fetch YouTube channel for account: {}", e);
+                                        let win3 = win.clone();
                                         let _ = slint::invoke_from_event_loop(move || {
-                                            if let Some(w) = win2.upgrade() {
-                                                w.set_status_message(err_msg.into());
+                                            if let Some(w) = win3.upgrade() {
+                                                w.set_channel_name("".into());
+                                                w.set_auth_state_text("Google authenticated (no YouTube channel)".into());
+                                                w.set_status_message("Google authenticated (channel not found or accessible)".into());
                                             }
                                         });
                                     }
@@ -604,6 +654,8 @@ async fn main() -> Result<()> {
                                 let err_msg = format!("Google sign in error: {}", e);
                                 let _ = slint::invoke_from_event_loop(move || {
                                     if let Some(w) = win2.upgrade() {
+                                        w.set_is_authenticating(false);
+                                        w.set_auth_state_text("Authentication cancelled or failed".into());
                                         w.set_status_message(err_msg.into());
                                     }
                                 });
@@ -617,8 +669,12 @@ async fn main() -> Result<()> {
                     let win = worker_window.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(w) = win.upgrade() {
+                            w.set_is_authenticating(false);
                             w.set_is_logged_in(false);
                             w.set_user_display_name("Sign In".into());
+                            w.set_user_email("".into());
+                            w.set_channel_name("".into());
+                            w.set_auth_state_text("Signed out".into());
                             w.set_status_message("Signed out and cleared credentials.".into());
                         }
                     });

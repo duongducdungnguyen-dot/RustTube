@@ -193,7 +193,7 @@ const FALLBACK_VIDEOS = [
     description: 'Chill lofi beats to relax and unwind.',
   },
   {
-    id: 'kJQP7kiw5Fk',
+    id: '5C_HPTJg5ek',
     title: 'Coding in Rust: The Fast, Memory-Safe Systems Language',
     channel: 'Systems Dev',
     subscribers: '450K',
@@ -202,10 +202,19 @@ const FALLBACK_VIDEOS = [
     views: '890K views',
     published: '2024-05-18',
     thumbnail: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?auto=format&fit=crop&w=800&q=80',
-    embedUrl: 'https://www.youtube-nocookie.com/embed/jfKfPfyJRdk?autoplay=1&enablejsapi=1',
+    embedUrl: 'https://www.youtube-nocookie.com/embed/5C_HPTJg5ek?autoplay=1&enablejsapi=1',
     description: 'A deep-dive tutorial into modern Rust development and native systems programming.',
   }
 ];
+
+function deduplicateList(list: any[]): any[] {
+  const seen = new Set<string>();
+  return list.filter(item => {
+    if (!item || !item.id || seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
 
 // Routes
 app.get('/api/feed', async (req, res) => {
@@ -214,7 +223,7 @@ app.get('/api/feed', async (req, res) => {
       return res.json({ videos: feedCache.data });
     }
 
-    const args = ['--js-runtimes', 'node', 'ytsearch24:trending videos', '--dump-json', '--flat-playlist', '--no-warnings', '--ignore-errors'];
+    const args = ['ytsearch24:trending videos', '--dump-json', '--flat-playlist', '--no-warnings', '--ignore-errors'];
     const { stdout } = await execFileAsync(YT_DLP_PATH, args, { maxBuffer: 10 * 1024 * 1024, timeout: 15000 });
 
     const videos: any[] = [];
@@ -232,16 +241,17 @@ app.get('/api/feed', async (req, res) => {
     }
 
     if (videos.length > 0) {
-      feedCache = { data: videos, timestamp: Date.now() };
-      return res.json({ videos });
+      const deduped = deduplicateList(videos);
+      feedCache = { data: deduped, timestamp: Date.now() };
+      return res.json({ videos: deduped });
     }
 
     // If yt-dlp produced empty results, fallback gracefully
-    res.json({ videos: FALLBACK_VIDEOS });
+    res.json({ videos: deduplicateList(FALLBACK_VIDEOS) });
   } catch (err: any) {
     console.warn('yt-dlp feed fetch encountered error, serving fallback feed:', err.message || err);
     // Serve fallback videos without error so user never gets 500
-    res.json({ videos: feedCache?.data && feedCache.data.length > 0 ? feedCache.data : FALLBACK_VIDEOS });
+    res.json({ videos: feedCache?.data && feedCache.data.length > 0 ? deduplicateList(feedCache.data) : deduplicateList(FALLBACK_VIDEOS) });
   }
 });
 
@@ -281,7 +291,7 @@ app.get('/api/search', async (req, res) => {
       });
     }
 
-    const args = ['--js-runtimes', 'node', `ytsearch24:${parsed.query || query}`, '--dump-json', '--flat-playlist', '--no-warnings', '--ignore-errors'];
+    const args = [`ytsearch24:${parsed.query || query}`, '--dump-json', '--flat-playlist', '--no-warnings', '--ignore-errors'];
     const { stdout } = await execFileAsync(YT_DLP_PATH, args, { maxBuffer: 10 * 1024 * 1024, timeout: 15000 });
 
     const videos: any[] = [];
@@ -299,7 +309,7 @@ app.get('/api/search', async (req, res) => {
     }
 
     if (videos.length > 0) {
-      return res.json({ videos });
+      return res.json({ videos: deduplicateList(videos) });
     }
 
     // Filter fallback if matched
@@ -307,14 +317,14 @@ app.get('/api/search', async (req, res) => {
     const matched = FALLBACK_VIDEOS.filter(v =>
       v.title.toLowerCase().includes(qLower) || v.channel.toLowerCase().includes(qLower)
     );
-    res.json({ videos: matched.length > 0 ? matched : FALLBACK_VIDEOS.slice(0, 4) });
+    res.json({ videos: deduplicateList(matched.length > 0 ? matched : FALLBACK_VIDEOS.slice(0, 4)) });
   } catch (err: any) {
     console.warn('Search fallback for query:', query, err.message || err);
     const qLower = query.toLowerCase();
     const matched = FALLBACK_VIDEOS.filter(v =>
       v.title.toLowerCase().includes(qLower) || v.channel.toLowerCase().includes(qLower)
     );
-    res.json({ videos: matched.length > 0 ? matched : FALLBACK_VIDEOS.slice(0, 4) });
+    res.json({ videos: deduplicateList(matched.length > 0 ? matched : FALLBACK_VIDEOS.slice(0, 4)) });
   }
 });
 
@@ -377,14 +387,39 @@ app.get('/api/history', (req, res) => {
 
 app.post('/api/history', (req, res) => {
   const video = req.body;
-  if (!video || !video.id) return res.status(400).json({ error: 'Missing video' });
+  if (!video || !video.id || typeof video.id !== 'string') {
+    return res.status(400).json({ error: 'Missing valid video' });
+  }
+
+  const normalizedEntry = {
+    id: video.id,
+    title: video.title || 'Untitled',
+    channel: video.channel || video.channel_name || 'YouTube Channel',
+    channel_name: video.channel || video.channel_name || 'YouTube Channel',
+    channel_id: video.channel_id || '',
+    duration: video.duration || video.duration_string || '--:--',
+    duration_string: video.duration || video.duration_string || '--:--',
+    durationSeconds: typeof video.durationSeconds === 'number' ? video.durationSeconds : (typeof video.duration_seconds === 'number' ? video.duration_seconds : 0),
+    duration_seconds: typeof video.durationSeconds === 'number' ? video.durationSeconds : (typeof video.duration_seconds === 'number' ? video.duration_seconds : 0),
+    views: video.views || '',
+    view_count: typeof video.view_count === 'number' ? video.view_count : 0,
+    thumbnail: video.thumbnail || video.thumbnail_url || `https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`,
+    thumbnail_url: video.thumbnail || video.thumbnail_url || `https://i.ytimg.com/vi/${video.id}/hqdefault.jpg`,
+    embedUrl: video.embedUrl || `https://www.youtube-nocookie.com/embed/${video.id}?autoplay=1&enablejsapi=1`,
+    description: video.description || '',
+    published: video.published || video.published_time || '',
+    published_time: video.published || video.published_time || '',
+    watchedAt: Date.now(),
+  };
 
   try {
     let list: any[] = [];
     if (fs.existsSync(HISTORY_FILE)) {
-      list = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+      try {
+        list = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'));
+      } catch {}
     }
-    list = [video, ...list.filter(v => v.id !== video.id)].slice(0, 500);
+    list = [normalizedEntry, ...list.filter(v => v.id !== video.id)].slice(0, 500);
     fs.writeFileSync(HISTORY_FILE, JSON.stringify(list, null, 2));
     res.json({ success: true, count: list.length });
   } catch (err) {
