@@ -6,7 +6,7 @@ use rusttube_core::models::ChannelItem;
 pub fn render_subscriptions_view(
     ui: &mut Ui,
     channels: &[ChannelItem],
-    thumbnails: &ThumbnailManager,
+    _thumbnails: &ThumbnailManager,
     is_logged_in: bool,
     on_login_click: &mut bool,
 ) {
@@ -14,7 +14,7 @@ pub fn render_subscriptions_view(
         ui.label(
             RichText::new("Subscribed Channels")
                 .size(18.0)
-                .bold()
+                .strong()
                 .color(THEME.text_white),
         );
         ui.label(
@@ -38,7 +38,7 @@ pub fn render_subscriptions_view(
                     .button(
                         RichText::new("Sign In with Google")
                             .size(12.0)
-                            .bold()
+                            .strong()
                             .color(THEME.text_white),
                     )
                     .clicked()
@@ -81,7 +81,7 @@ pub fn render_subscriptions_view(
                                 ui.label(
                                     RichText::new(&ch.title)
                                         .size(13.0)
-                                        .bold()
+                                        .strong()
                                         .color(THEME.text_white),
                                 );
                                 ui.label(

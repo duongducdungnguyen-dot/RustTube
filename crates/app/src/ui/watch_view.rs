@@ -1,6 +1,6 @@
 use crate::cache::ThumbnailManager;
 use crate::theme::THEME;
-use egui::{Color32, CornerRadius, RichText, Slider, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, RichText, Rounding, Slider, Stroke, Ui, Vec2};
 use rusttube_core::models::{PlaybackStatus, VideoItem};
 
 pub fn render_watch_view(
@@ -8,8 +8,8 @@ pub fn render_watch_view(
     selected_video: &VideoItem,
     video_description: &str,
     status: &PlaybackStatus,
-    related_videos: &[VideoItem],
-    thumbnails: &ThumbnailManager,
+    _related_videos: &[VideoItem],
+    _thumbnails: &ThumbnailManager,
     in_watch_later: bool,
     is_liked: bool,
     on_back: &mut bool,
@@ -20,13 +20,13 @@ pub fn render_watch_view(
     on_quality_change: &mut Option<String>,
     on_toggle_watch_later: &mut bool,
     on_toggle_like: &mut bool,
-    on_select_related: &mut Option<VideoItem>,
+    _on_select_related: &mut Option<VideoItem>,
 ) {
     ui.vertical(|ui| {
         // Top Navigation Bar
         ui.horizontal(|ui| {
             if ui
-                .button(RichText::new("← Back to Browse").size(12.0).bold())
+                .button(RichText::new("← Back to Browse").size(12.0).strong())
                 .clicked()
             {
                 *on_back = true;
@@ -46,13 +46,13 @@ pub fn render_watch_view(
         // Native Player Canvas / Placeholder Surface
         let player_height = 420.0;
         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), player_height), egui::Sense::hover());
-        ui.painter().rect_filled(rect, CornerRadius::same(8), Color32::BLACK);
-        ui.painter().rect_stroke(rect, CornerRadius::same(8), Stroke::new(1.0, THEME.border));
+        ui.painter().rect_filled(rect, Rounding::same(8.0), Color32::BLACK);
+        ui.painter().rect_stroke(rect, Rounding::same(8.0), Stroke::new(1.0, THEME.border));
 
         if !status.is_playing {
             ui.painter().text(
                 rect.center(),
-                egui::Align::Center,
+                Align2::CENTER_CENTER,
                 "▶ Playing in hardware accelerated libmpv engine",
                 egui::FontId::proportional(15.0),
                 THEME.text_subdued,
@@ -66,7 +66,7 @@ pub fn render_watch_view(
             ui.horizontal(|ui| {
                 // Play / Pause Button
                 let play_btn_text = if status.is_playing { "⏸ Pause" } else { "▶ Play" };
-                if ui.button(RichText::new(play_btn_text).size(12.0).bold()).clicked() {
+                if ui.button(RichText::new(play_btn_text).size(12.0).strong()).clicked() {
                     *on_toggle_play = true;
                 }
 
@@ -163,7 +163,7 @@ pub fn render_watch_view(
         ui.label(
             RichText::new(&selected_video.title)
                 .size(18.0)
-                .bold()
+                .strong()
                 .color(THEME.text_white),
         );
 
@@ -173,7 +173,7 @@ pub fn render_watch_view(
             ui.label(
                 RichText::new(format!("📺 {}", &selected_video.channel_name))
                     .size(13.0)
-                    .bold()
+                    .strong()
                     .color(THEME.text_white),
             );
 
@@ -199,7 +199,7 @@ pub fn render_watch_view(
                 ui.label(
                     RichText::new("Description")
                         .size(12.0)
-                        .bold()
+                        .strong()
                         .color(THEME.text_subdued),
                 );
                 ui.add_space(4.0);

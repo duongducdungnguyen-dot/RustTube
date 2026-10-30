@@ -14,7 +14,7 @@ pub fn render_playlists_view(
     on_select_playlist: &mut Option<PlaylistItem>,
     on_select_video: &mut Option<VideoItem>,
     new_playlist_title: &mut String,
-    new_playlist_desc: &mut String,
+    _new_playlist_desc: &mut String,
     on_create_playlist: &mut bool,
 ) {
     ui.vertical(|ui| {
@@ -22,16 +22,16 @@ pub fn render_playlists_view(
             ui.label(
                 RichText::new("Your Playlists")
                     .size(18.0)
-                    .bold()
+                    .strong()
                     .color(THEME.text_white),
             );
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if is_logged_in {
                     ui.menu_button(
-                        RichText::new("➕ New Playlist").size(12.0).bold(),
+                        RichText::new("➕ New Playlist").size(12.0).strong(),
                         |ui| {
-                            ui.label(RichText::new("Create New YouTube Playlist").bold());
+                            ui.label(RichText::new("Create New YouTube Playlist").strong());
                             ui.add_space(4.0);
                             ui.text_edit_singleline(new_playlist_title);
                             ui.add_space(4.0);
@@ -62,7 +62,7 @@ pub fn render_playlists_view(
                     .button(
                         RichText::new("Sign In with Google")
                             .size(12.0)
-                            .bold()
+                            .strong()
                             .color(THEME.text_white),
                     )
                     .clicked()
@@ -82,7 +82,7 @@ pub fn render_playlists_view(
                 ui.label(
                     RichText::new(&pl.title)
                         .size(16.0)
-                        .bold()
+                        .strong()
                         .color(THEME.text_white),
                 );
             });
@@ -140,7 +140,7 @@ pub fn render_playlists_view(
                             ui.label(
                                 RichText::new(&pl.title)
                                     .size(14.0)
-                                    .bold()
+                                    .strong()
                                     .color(THEME.text_white),
                             );
                             ui.label(

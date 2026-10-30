@@ -17,7 +17,7 @@ pub fn render_history_view(
             ui.label(
                 RichText::new("Watch History")
                     .size(18.0)
-                    .bold()
+                    .strong()
                     .color(THEME.text_white),
             );
 

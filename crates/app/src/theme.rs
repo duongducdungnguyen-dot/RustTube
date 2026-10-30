@@ -1,4 +1,4 @@
-use egui::{Color32, CornerRadius, Margin, FontId, FontFamily, Stroke, Style, Visuals};
+use egui::{Color32, Rounding, Stroke, Visuals};
 
 pub struct ThemeColors {
     pub bg_dark: Color32,
@@ -33,24 +33,24 @@ pub fn configure_theme(ctx: &egui::Context) {
     visuals.override_text_color = Some(THEME.text_white);
     visuals.panel_fill = THEME.bg_dark;
     visuals.window_fill = THEME.bg_dark;
-    visuals.extreme_bg = Color32::from_rgb(18, 19, 26);
-    visuals.faint_bg = THEME.card_bg;
+    visuals.extreme_bg_color = Color32::from_rgb(18, 19, 26);
+    visuals.faint_bg_color = THEME.card_bg;
 
     visuals.widgets.noninteractive.bg_fill = THEME.card_bg;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, THEME.border);
-    visuals.widgets.noninteractive.corner_radius = CornerRadius::same(6);
+    visuals.widgets.noninteractive.rounding = Rounding::same(6.0);
 
     visuals.widgets.inactive.bg_fill = THEME.card_bg;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, THEME.border);
-    visuals.widgets.inactive.corner_radius = CornerRadius::same(6);
+    visuals.widgets.inactive.rounding = Rounding::same(6.0);
 
     visuals.widgets.hovered.bg_fill = THEME.card_hover;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(60, 65, 88));
-    visuals.widgets.hovered.corner_radius = CornerRadius::same(6);
+    visuals.widgets.hovered.rounding = Rounding::same(6.0);
 
     visuals.widgets.active.bg_fill = Color32::from_rgb(35, 38, 52);
     visuals.widgets.active.bg_stroke = Stroke::new(1.0, THEME.crimson);
-    visuals.widgets.active.corner_radius = CornerRadius::same(6);
+    visuals.widgets.active.rounding = Rounding::same(6.0);
 
     ctx.set_visuals(visuals);
 }

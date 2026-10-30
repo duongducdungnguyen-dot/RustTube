@@ -1,6 +1,6 @@
 use crate::cache::ThumbnailManager;
 use crate::theme::THEME;
-use egui::{Align, Color32, CornerRadius, Image, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, Image, Rect, RichText, Rounding, Sense, Stroke, Ui, Vec2};
 use rusttube_core::models::VideoItem;
 
 pub fn render_video_grid(
@@ -9,7 +9,7 @@ pub fn render_video_grid(
     thumbnails: &ThumbnailManager,
     watch_later_ids: &[String],
     on_select_video: &mut Option<VideoItem>,
-    on_toggle_watch_later: &mut Option<VideoItem>,
+    _on_toggle_watch_later: &mut Option<VideoItem>,
 ) {
     if videos.is_empty() {
         ui.vertical_centered(|ui| {
@@ -62,8 +62,8 @@ pub fn render_video_grid(
                         Stroke::new(1.0, THEME.border)
                     };
 
-                    ui.painter().rect_filled(rect, CornerRadius::same(8), bg_color);
-                    ui.painter().rect_stroke(rect, CornerRadius::same(8), stroke);
+                    ui.painter().rect_filled(rect, Rounding::same(8.0), bg_color);
+                    ui.painter().rect_stroke(rect, Rounding::same(8.0), stroke);
 
                     // Top Thumbnail Area
                     let thumb_height = 158.0;
@@ -71,27 +71,27 @@ pub fn render_video_grid(
 
                     if let Some(tex) = thumbnails.get_or_load(&video.thumbnail_url) {
                         Image::new(&tex)
-                            .corner_radius(CornerRadius {
-                                nw: 8,
-                                ne: 8,
-                                sw: 0,
-                                se: 0,
+                            .rounding(Rounding {
+                                nw: 8.0,
+                                ne: 8.0,
+                                sw: 0.0,
+                                se: 0.0,
                             })
                             .paint_at(ui, thumb_rect);
                     } else {
                         ui.painter().rect_filled(
                             thumb_rect,
-                            CornerRadius {
-                                nw: 8,
-                                ne: 8,
-                                sw: 0,
-                                se: 0,
+                            Rounding {
+                                nw: 8.0,
+                                ne: 8.0,
+                                sw: 0.0,
+                                se: 0.0,
                             },
                             Color32::from_rgb(18, 19, 26),
                         );
                         ui.painter().text(
                             thumb_rect.center(),
-                            Align::Center,
+                            Align2::CENTER_CENTER,
                             "▶",
                             egui::FontId::proportional(20.0),
                             THEME.text_muted,
@@ -138,7 +138,7 @@ pub fn render_video_grid(
                         let wl_icon = if in_watch_later { "🔖" } else { "📌" };
                         ui.painter().text(
                             wl_rect.center(),
-                            Align::Center,
+                            Align2::CENTER_CENTER,
                             wl_icon,
                             egui::FontId::proportional(12.0),
                             Color32::WHITE,
@@ -159,7 +159,7 @@ pub fn render_video_grid(
                     };
                     ui.painter().text(
                         text_rect.min,
-                        Align::LEFT,
+                        Align2::LEFT_TOP,
                         &title_text,
                         egui::FontId::proportional(12.0),
                         if is_hovered { THEME.crimson } else { THEME.text_white },
@@ -181,7 +181,7 @@ pub fn render_video_grid(
                     );
                     ui.painter().text(
                         text_rect.min + Vec2::new(0.0, 36.0),
-                        Align::LEFT,
+                        Align2::LEFT_TOP,
                         &meta_text,
                         egui::FontId::proportional(11.0),
                         THEME.text_subdued,

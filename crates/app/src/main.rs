@@ -72,7 +72,7 @@ fn main() -> Result<()> {
                 player,
             )))
         }),
-    )?;
+    ).map_err(|e| anyhow::anyhow!("eframe application error: {}", e))?;
 
     Ok(())
 }

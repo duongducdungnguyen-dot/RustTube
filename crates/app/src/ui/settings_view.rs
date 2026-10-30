@@ -17,7 +17,7 @@ pub fn render_settings_view(
         ui.label(
             RichText::new("Application Settings")
                 .size(18.0)
-                .bold()
+                .strong()
                 .color(THEME.text_white),
         );
         ui.label(
@@ -34,7 +34,7 @@ pub fn render_settings_view(
             ui.label(
                 RichText::new("Google Account & OAuth 2.0 PKCE")
                     .size(14.0)
-                    .bold()
+                    .strong()
                     .color(THEME.text_white),
             );
             ui.add_space(6.0);
@@ -49,7 +49,7 @@ pub fn render_settings_view(
                     ui.label(
                         RichText::new(&user.name)
                             .size(12.0)
-                            .bold()
+                            .strong()
                             .color(THEME.text_white),
                     );
                     ui.label(
@@ -89,7 +89,7 @@ pub fn render_settings_view(
                     .button(
                         RichText::new("Sign In with Google")
                             .size(12.0)
-                            .bold()
+                            .strong()
                             .color(THEME.text_white),
                     )
                     .clicked()
@@ -107,7 +107,7 @@ pub fn render_settings_view(
             ui.label(
                 RichText::new("Playback & Hardware Acceleration")
                     .size(14.0)
-                    .bold()
+                    .strong()
                     .color(THEME.text_white),
             );
             ui.add_space(6.0);
@@ -155,7 +155,7 @@ pub fn render_settings_view(
             ui.label(
                 RichText::new("Local Database & Disk Cache")
                     .size(14.0)
-                    .bold()
+                    .strong()
                     .color(THEME.text_white),
             );
             ui.add_space(6.0);

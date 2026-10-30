@@ -27,7 +27,7 @@ pub fn render_header(
         }
 
         if ui
-            .button(RichText::new("🔍 Search").size(12.0).bold())
+            .button(RichText::new("🔍 Search").size(12.0).strong())
             .clicked()
         {
             *on_search = true;
@@ -53,7 +53,7 @@ pub fn render_header(
                 ui.menu_button(
                     RichText::new(format!("👤 {}", label_text))
                         .size(12.0)
-                        .bold()
+                        .strong()
                         .color(THEME.text_white),
                     |ui| {
                         ui.label(RichText::new(&user.email).size(11.0).color(THEME.text_muted));
@@ -73,7 +73,7 @@ pub fn render_header(
                 .button(
                     RichText::new("Sign In with Google")
                         .size(12.0)
-                        .bold()
+                        .strong()
                         .color(THEME.text_white),
                 )
                 .clicked()

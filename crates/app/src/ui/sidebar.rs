@@ -1,5 +1,5 @@
 use crate::theme::THEME;
-use egui::{Align, Color32, Layout, RichText, Sense, Ui, Vec2};
+use egui::{Align, Align2, Color32, Layout, RichText, Sense, Ui, Vec2};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -29,7 +29,7 @@ pub fn render_sidebar(
             ui.painter().rect_filled(rect, 4.0, THEME.crimson);
             ui.painter().text(
                 rect.center(),
-                Align::Center,
+                Align2::CENTER_CENTER,
                 "▶",
                 egui::FontId::proportional(10.0),
                 Color32::WHITE,
@@ -38,7 +38,7 @@ pub fn render_sidebar(
             ui.label(
                 RichText::new("RustTube")
                     .size(17.0)
-                    .bold()
+                    .strong()
                     .color(THEME.text_white),
             );
         });
@@ -79,7 +79,7 @@ pub fn render_sidebar(
                 let text_pos = response.rect.min + Vec2::new(14.0, 8.0);
                 ui.painter().text(
                     text_pos,
-                    Align::LEFT,
+                    Align2::LEFT_CENTER,
                     label,
                     egui::FontId::proportional(13.0),
                     text_color,
@@ -91,7 +91,7 @@ pub fn render_sidebar(
                         let badge_pos = response.rect.max - Vec2::new(14.0, 18.0);
                         ui.painter().text(
                             badge_pos,
-                            Align::RIGHT,
+                            Align2::RIGHT_CENTER,
                             &count_str,
                             egui::FontId::monospace(11.0),
                             THEME.text_muted,

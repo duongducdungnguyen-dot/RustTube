@@ -9,13 +9,13 @@ use eframe::App;
 use egui::{CentralPanel, Context, SidePanel, TopBottomPanel};
 use rusttube_api::YouTubeApiClient;
 use rusttube_auth::{GoogleAuthManager, GoogleUserInfo};
+use rusttube_core::events::UiCommand;
 use rusttube_core::models::{ChannelItem, PlaybackStatus, PlaylistItem, VideoItem};
 use rusttube_player::PlayerController;
 use rusttube_storage::{Database, HistoryRepository, SyncRepository, WatchLaterRepository};
 use rusttube_ytdlp::YtDlpWrapper;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
 
 pub enum WorkerEvent {
     FeedLoaded(Vec<VideoItem>),
@@ -23,18 +23,18 @@ pub enum WorkerEvent {
     WatchLaterUpdated(Vec<VideoItem>),
     SubscriptionsLoaded(Vec<ChannelItem>),
     PlaylistsLoaded(Vec<PlaylistItem>),
-    PlaylistItemsLoaded(Vec<VideoItem>),
+    _PlaylistItemsLoaded(Vec<VideoItem>),
     LikedVideosLoaded(Vec<VideoItem>),
     AuthSuccess(GoogleUserInfo),
     AuthLoggedOut,
     SyncFinished,
-    PlaybackStatusUpdated(PlaybackStatus),
+    _PlaybackStatusUpdated(PlaybackStatus),
     VideoDetailLoaded { description: String },
     StatusMessage(String),
 }
 
 pub struct RustTubeApp {
-    db: Database,
+    _db: Database,
     history_repo: HistoryRepository,
     watch_later_repo: WatchLaterRepository,
     sync_repo: SyncRepository,
@@ -48,7 +48,7 @@ pub struct RustTubeApp {
     current_page: Page,
     search_query: String,
     status_message: String,
-    is_loading: bool,
+    _is_loading: bool,
     is_syncing: bool,
     last_sync_text: String,
 
@@ -108,7 +108,7 @@ impl RustTubeApp {
         let initial_likes = sync_repo.get_liked_videos().unwrap_or_default();
 
         let app = Self {
-            db,
+            _db: db,
             history_repo,
             watch_later_repo,
             sync_repo,
@@ -121,7 +121,7 @@ impl RustTubeApp {
             current_page: Page::Home,
             search_query: String::new(),
             status_message: String::new(),
-            is_loading: false,
+            _is_loading: false,
             is_syncing: false,
             last_sync_text: String::new(),
 
@@ -206,7 +206,7 @@ impl RustTubeApp {
                 ))
                 .await;
 
-            match auth.start_auth_flow().await {
+            match auth.start_oauth_flow().await {
                 Ok((_token, user_info)) => {
                     let _ = tx.send(WorkerEvent::AuthSuccess(user_info)).await;
                 }
@@ -333,7 +333,7 @@ impl RustTubeApp {
             match event {
                 WorkerEvent::FeedLoaded(videos) => {
                     self.feed_videos = videos;
-                    self.is_loading = false;
+                    self._is_loading = false;
                 }
                 WorkerEvent::HistoryUpdated(items) => {
                     self.history_videos = items;
@@ -347,7 +347,7 @@ impl RustTubeApp {
                 WorkerEvent::PlaylistsLoaded(pls) => {
                     self.playlists = pls;
                 }
-                WorkerEvent::PlaylistItemsLoaded(items) => {
+                WorkerEvent::_PlaylistItemsLoaded(items) => {
                     self.playlist_items = items;
                 }
                 WorkerEvent::LikedVideosLoaded(likes) => {
@@ -369,7 +369,7 @@ impl RustTubeApp {
                     self.last_sync_text = "Just now".to_string();
                     self.status_message = "Account synchronized successfully.".to_string();
                 }
-                WorkerEvent::PlaybackStatusUpdated(status) => {
+                WorkerEvent::_PlaybackStatusUpdated(status) => {
                     self.playback_status = status;
                 }
                 WorkerEvent::VideoDetailLoaded { description } => {
@@ -409,7 +409,7 @@ impl App for RustTubeApp {
                 );
 
                 if on_search {
-                    self.is_loading = true;
+                    self._is_loading = true;
                     self.current_page = Page::Home;
                     self.trigger_search(self.search_query.clone());
                 }
@@ -515,7 +515,7 @@ impl App for RustTubeApp {
                                 let player = self.player.clone();
                                 tokio::spawn(async move {
                                     let p = player.lock().await;
-                                    let _ = p.toggle_play_pause().await;
+                                    let _ = p.handle_command(UiCommand::TogglePlayPause).await;
                                 });
                             }
 
@@ -531,7 +531,7 @@ impl App for RustTubeApp {
                                 let player = self.player.clone();
                                 tokio::spawn(async move {
                                     let p = player.lock().await;
-                                    let _ = p.set_volume(vol).await;
+                                    let _ = p.handle_command(UiCommand::SetVolume(vol)).await;
                                 });
                             }
 
@@ -539,7 +539,7 @@ impl App for RustTubeApp {
                                 let player = self.player.clone();
                                 tokio::spawn(async move {
                                     let p = player.lock().await;
-                                    let _ = p.set_speed(speed).await;
+                                    let _ = p.handle_command(UiCommand::SetSpeed(speed)).await;
                                 });
                             }
 

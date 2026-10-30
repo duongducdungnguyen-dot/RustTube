@@ -16,7 +16,7 @@ pub fn render_watch_later_view(
             ui.label(
                 RichText::new("Watch Later")
                     .size(18.0)
-                    .bold()
+                    .strong()
                     .color(THEME.text_white),
             );
 
