@@ -93,9 +93,54 @@ impl YtDlpWrapper {
         Ok(results)
     }
 
+    pub async fn get_available_qualities(&self, video_id: &str) -> Vec<String> {
+        let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
+        let mut cmd = self.configure_command();
+        cmd.arg("--dump-json")
+            .arg("--no-playlist")
+            .arg(&video_url)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Ok(output) = cmd.output().await {
+            if output.status.success() {
+                if let Ok(json) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&output.stdout)) {
+                    if let Some(formats) = json["formats"].as_array() {
+                        let mut heights: Vec<u64> = formats
+                            .iter()
+                            .filter_map(|f| f["height"].as_u64())
+                            .filter(|&h| h > 0)
+                            .collect();
+                        heights.sort_unstable_by(|a, b| b.cmp(a));
+                        heights.dedup();
+
+                        let mut qualities = vec!["Auto".to_string()];
+                        for h in heights {
+                            let label = if h >= 2160 {
+                                "4K (2160p)".to_string()
+                            } else if h >= 1440 {
+                                "1440p".to_string()
+                            } else {
+                                format!("{}p", h)
+                            };
+                            if !qualities.contains(&label) {
+                                qualities.push(label);
+                            }
+                        }
+                        if qualities.len() > 1 {
+                            return qualities;
+                        }
+                    }
+                }
+            }
+        }
+
+        vec!["Auto".into(), "1080p".into(), "720p".into(), "480p".into(), "360p".into()]
+    }
+
     pub async fn get_stream_info(&self, video_id: &str, preferred_quality: &str) -> Result<StreamInfo> {
         let format_spec = match preferred_quality {
-            "4K" | "2160p" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
+            "4K" | "2160p" | "4K (2160p)" => "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
             "1440p" => "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best",
             "1080p" => "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
             "720p" => "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
@@ -106,7 +151,8 @@ impl YtDlpWrapper {
 
         let video_url = format!("https://www.youtube.com/watch?v={}", video_id);
         let mut cmd = self.configure_command();
-        cmd.arg("-g")
+        cmd.arg("--print")
+            .arg("%(url)s|%(vcodec)s|%(acodec)s|%(resolution)s")
             .arg("-f")
             .arg(format_spec)
             .arg("--no-playlist")
@@ -117,34 +163,51 @@ impl YtDlpWrapper {
         let output = cmd.output().await?;
         if output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let urls: Vec<&str> = stdout.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+            let mut found_video_url = None;
+            let mut found_audio_url = None;
+            let mut detected_res = preferred_quality.to_string();
 
-            if urls.len() >= 2 {
-                // Separate video and audio streams
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.trim().split('|').collect();
+                if parts.len() >= 3 {
+                    let u = parts[0].trim();
+                    let vcodec = parts[1].trim();
+                    let acodec = parts[2].trim();
+                    if parts.len() >= 4 && !parts[3].trim().is_empty() && parts[3].trim() != "null" {
+                        detected_res = parts[3].trim().to_string();
+                    }
+
+                    if vcodec != "none" && !vcodec.is_empty() && found_video_url.is_none() {
+                        found_video_url = Some(u.to_string());
+                    }
+                    if acodec != "none" && !acodec.is_empty() && (vcodec == "none" || vcodec.is_empty()) && found_audio_url.is_none() {
+                        found_audio_url = Some(u.to_string());
+                    }
+                }
+            }
+
+            if let Some(v_url) = found_video_url {
                 return Ok(StreamInfo {
-                    video_url: urls[0].to_string(),
-                    audio_url: Some(urls[1].to_string()),
+                    video_url: v_url,
+                    audio_url: found_audio_url,
                     format_id: format_spec.to_string(),
-                    resolution: preferred_quality.to_string(),
-                });
-            } else if let Some(&first) = urls.first() {
-                // Combined audio+video stream
-                return Ok(StreamInfo {
-                    video_url: first.to_string(),
-                    audio_url: None,
-                    format_id: format_spec.to_string(),
-                    resolution: preferred_quality.to_string(),
+                    resolution: detected_res,
                 });
             }
         }
 
-        // Fallback directly to YouTube URL (delegated to mpv ytdl hook)
-        Ok(StreamInfo {
-            video_url,
-            audio_url: None,
-            format_id: "auto".to_string(),
-            resolution: preferred_quality.to_string(),
-        })
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let first_err = stderr
+            .lines()
+            .find(|l| l.contains("ERROR"))
+            .unwrap_or_else(|| stderr.lines().next().unwrap_or("Stream extraction failed"))
+            .trim();
+
+        Err(anyhow!(
+            "Could not extract stream for video {}: {}. If required, enable browser cookies in Settings.",
+            video_id,
+            first_err
+        ))
     }
 
     pub async fn get_video_detail(&self, video_id: &str) -> Result<VideoDetail> {

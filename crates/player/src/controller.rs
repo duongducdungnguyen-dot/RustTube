@@ -27,7 +27,7 @@ impl PlayerController {
         self.window_id = Some(wid);
         if let Some(mpv) = &self.mpv {
             if let Ok(inst) = mpv.try_lock() {
-                let _ = inst.set_option("wid", &wid.to_string());
+                let _ = inst.set_property("wid", &wid.to_string());
             }
         }
     }
@@ -59,10 +59,10 @@ impl PlayerController {
         if let Some(mpv) = &self.mpv {
             let inst = mpv.lock().await;
 
-            inst.load_file(&stream.video_url)?;
-
             if let Some(ref audio_url) = stream.audio_url {
-                let _ = inst.command(&["audio-add", audio_url, "auto"]);
+                inst.command(&["loadfile", &stream.video_url, "replace", &format!("audio-file={}", audio_url)])?;
+            } else {
+                inst.load_file(&stream.video_url)?;
             }
 
             inst.play()?;
@@ -86,29 +86,37 @@ impl PlayerController {
         let inst = mpv.lock().await;
         match cmd {
             UiCommand::TogglePlayPause => {
-                let _ = inst.toggle_pause();
+                inst.toggle_pause()?;
             }
             UiCommand::SeekRelative(seconds) => {
-                let _ = inst.seek_relative(seconds);
+                inst.seek_relative(seconds)?;
             }
             UiCommand::SeekAbsolute(seconds) => {
-                let _ = inst.seek_absolute(seconds);
+                inst.seek_absolute(seconds)?;
             }
             UiCommand::SetVolume(vol) => {
-                let _ = inst.set_volume(vol);
+                inst.set_volume(vol)?;
             }
             UiCommand::SetSpeed(speed) => {
-                let _ = inst.set_speed(speed);
+                inst.set_speed(speed)?;
             }
             UiCommand::ToggleFullscreen => {
                 let is_fs = inst.get_property("fullscreen").map(|s| s == "yes").unwrap_or(false);
-                let _ = inst.set_property("fullscreen", if is_fs { "no" } else { "yes" });
+                inst.set_property("fullscreen", if is_fs { "no" } else { "yes" })?;
             }
             UiCommand::ToggleSubtitles => {
                 let sub = inst.get_property("sub-visibility").map(|s| s == "yes").unwrap_or(false);
-                let _ = inst.set_property("sub-visibility", if sub { "no" } else { "yes" });
+                inst.set_property("sub-visibility", if sub { "no" } else { "yes" })?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    pub async fn seek_absolute(&self, seconds: f64) -> Result<()> {
+        if let Some(mpv) = &self.mpv {
+            let inst = mpv.lock().await;
+            inst.seek_absolute(seconds)?;
         }
         Ok(())
     }

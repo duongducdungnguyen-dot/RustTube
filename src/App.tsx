@@ -54,7 +54,7 @@ interface UserAuth {
 }
 
 export default function App() {
-  const [currentPage, setCurrentPage] = useState<'home' | 'subscriptions' | 'playlists' | 'watch_later' | 'history' | 'settings'>('home');
+  const [currentPage, setCurrentPage] = useState<'home' | 'watch' | 'subscriptions' | 'playlists' | 'watch_later' | 'history' | 'settings'>('home');
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -107,9 +107,6 @@ export default function App() {
       const data = await res.json();
       if (Array.isArray(data.videos)) {
         setVideos(data.videos);
-        if (!selectedVideo && data.videos.length > 0) {
-          setSelectedVideo(data.videos[0]);
-        }
       }
     } catch (err: any) {
       console.error(err);
@@ -117,7 +114,7 @@ export default function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedVideo]);
+  }, []);
 
   // Load Watch Later
   const fetchWatchLater = async () => {
@@ -193,6 +190,7 @@ export default function App() {
     setSelectedVideo(video);
     setIsPlaying(true);
     setCurrentTime(0);
+    setCurrentPage('watch');
 
     // Record to history backend
     try {
@@ -526,8 +524,139 @@ export default function App() {
                 </div>
               )}
 
-              {/* Settings View */}
-              {currentPage === 'settings' ? (
+              {/* Dedicated Watch Page */}
+              {currentPage === 'watch' && selectedVideo ? (
+                <div className="max-w-5xl mx-auto space-y-5">
+                  {/* Top Bar with Back Button */}
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => setCurrentPage('home')}
+                      className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#141620] hover:bg-[#1a1d2c] border border-[#232636] text-xs text-[#a0a4b8] hover:text-white transition-colors"
+                    >
+                      <span>← Back to Browse</span>
+                    </button>
+                    <span className="text-xs text-[#71768d] font-mono">
+                      {quality} • {speed}x • {hwdecSetting}
+                    </span>
+                  </div>
+
+                  {/* Native / Embedded Video Player Canvas */}
+                  <div className="relative aspect-video w-full rounded-2xl overflow-hidden bg-black shadow-2xl border border-[#1f212d] ring-1 ring-white/5">
+                    <iframe
+                      src={`${selectedVideo.embedUrl}?autoplay=1`}
+                      title={selectedVideo.title}
+                      className="w-full h-full object-cover"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                      allowFullScreen
+                    />
+                  </div>
+
+                  {/* Video Metadata Header */}
+                  <div className="space-y-3 pt-2">
+                    <h1 className="text-xl font-bold text-white leading-snug">
+                      {selectedVideo.title}
+                    </h1>
+
+                    <div className="flex flex-wrap items-center justify-between gap-4 pb-2 border-b border-[#1c1e29]">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-red-600 to-red-400 flex items-center justify-center font-bold text-white text-sm shrink-0 shadow">
+                          {selectedVideo.channel.slice(0, 1).toUpperCase()}
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-white">{selectedVideo.channel}</p>
+                          <p className="text-[11px] text-[#7b8094]">{selectedVideo.views} • {selectedVideo.published || 'Recent'}</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        {/* Like */}
+                        <button
+                          onClick={() => {
+                            setLikedList(prev =>
+                              prev.includes(selectedVideo.id)
+                                ? prev.filter(id => id !== selectedVideo.id)
+                                : [...prev, selectedVideo.id]
+                            );
+                            showNotification(likedList.includes(selectedVideo.id) ? 'Removed like' : 'Liked video');
+                          }}
+                          className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                            likedList.includes(selectedVideo.id)
+                              ? 'bg-[#ff0033]/20 border-[#ff0033]/50 text-[#ff4d6d]'
+                              : 'bg-[#151620] border-[#222533] text-[#a0a4b8] hover:text-white hover:bg-[#1c1e2b]'
+                          }`}
+                        >
+                          <ThumbsUp className="w-3.5 h-3.5" />
+                          <span>{likedList.includes(selectedVideo.id) ? 'Liked' : 'Like'}</span>
+                        </button>
+
+                        {/* Watch Later */}
+                        <button
+                          onClick={e => handleToggleWatchLater(selectedVideo, e)}
+                          className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                            watchLaterList.some(v => v.id === selectedVideo.id)
+                              ? 'bg-[#ff0033]/20 border-[#ff0033]/50 text-[#ff4d6d]'
+                              : 'bg-[#151620] border-[#222533] text-[#a0a4b8] hover:text-white hover:bg-[#1c1e2b]'
+                          }`}
+                        >
+                          {watchLaterList.some(v => v.id === selectedVideo.id) ? (
+                            <>
+                              <BookmarkCheck className="w-3.5 h-3.5" />
+                              <span>Saved</span>
+                            </>
+                          ) : (
+                            <>
+                              <Bookmark className="w-3.5 h-3.5" />
+                              <span>Watch Later</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Description Box */}
+                    <div className="p-4 rounded-xl bg-[#12141c] border border-[#1e202d] text-xs text-[#b0b4c8] leading-relaxed whitespace-pre-line max-h-48 overflow-y-auto">
+                      {videoDetail?.description || selectedVideo.description || 'No detailed description provided for this video.'}
+                    </div>
+                  </div>
+
+                  {/* Related / Up Next Videos Section */}
+                  <div className="pt-4 space-y-3">
+                    <h3 className="text-sm font-bold text-white">More Videos</h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                      {videos
+                        .filter(v => v.id !== selectedVideo.id)
+                        .slice(0, 8)
+                        .map(item => (
+                          <div
+                            key={item.id}
+                            onClick={() => handleSelectVideo(item)}
+                            className="group cursor-pointer rounded-xl bg-[#12131a] border border-[#1d1f2b] hover:border-[#2d3144] hover:bg-[#151722] overflow-hidden flex flex-col transition-all"
+                          >
+                            <div className="relative aspect-video w-full bg-[#181a24] overflow-hidden">
+                              <img
+                                src={item.thumbnail}
+                                alt={item.title}
+                                className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                                loading="lazy"
+                              />
+                              {item.duration && (
+                                <div className="absolute bottom-1.5 right-1.5 bg-black/85 text-white text-[10px] font-mono px-1.5 py-0.5 rounded">
+                                  {item.duration}
+                                </div>
+                              )}
+                            </div>
+                            <div className="p-2.5 flex flex-col justify-between flex-1 gap-1">
+                              <h4 className="text-xs font-semibold text-white line-clamp-2 group-hover:text-[#ff4d6d] transition-colors">
+                                {item.title}
+                              </h4>
+                              <p className="text-[11px] text-[#7d8296] truncate">{item.channel}</p>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                </div>
+              ) : currentPage === 'settings' ? (
                 <div className="max-w-2xl mx-auto space-y-6">
                   <div>
                     <h2 className="text-xl font-bold text-white">Application Settings</h2>
@@ -799,156 +928,87 @@ export default function App() {
               )}
             </div>
 
-            {/* Embedded Video Player Bar & Controls */}
-            {selectedVideo && (
-              <div ref={playerContainerRef} className="border-t border-[#1e202b] bg-[#111218] px-5 py-3 shrink-0 shadow-2xl space-y-2">
-                {/* Embedded Video Surface */}
-                <div className="hidden">
-                  <iframe
-                    src={selectedVideo.embedUrl}
-                    title={selectedVideo.title}
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                    allowFullScreen
-                  />
-                </div>
-
-                {/* Scrubber Timeline Slider */}
-                <div className="flex items-center gap-3">
-                  <span className="text-[11px] font-mono text-[#82869c] w-10 text-right">
-                    {formatSec(currentTime)}
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={selectedVideo.durationSeconds || 100}
-                    value={currentTime}
-                    onChange={e => setCurrentTime(Number(e.target.value))}
-                    className="flex-1 h-1.5 bg-[#232636] accent-[#ff0033] rounded-lg cursor-pointer"
-                  />
-                  <span className="text-[11px] font-mono text-[#82869c] w-10">
-                    {formatSec(selectedVideo.durationSeconds || 100)}
-                  </span>
-                </div>
-
-                {/* Player Controls */}
-                <div className="flex items-center justify-between gap-4">
-                  {/* Left Controls */}
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      onClick={() => setCurrentTime(t => Math.max(0, t - 10))}
-                      title="Seek backward 10s (J)"
-                      className="p-2 rounded-lg text-[#9094a8] hover:text-white hover:bg-[#1a1c26] transition-colors"
-                    >
-                      <RotateCcw className="w-4 h-4" />
-                    </button>
-
-                    <button
-                      onClick={() => setIsPlaying(p => !p)}
-                      title={isPlaying ? 'Pause (Space or K)' : 'Play (Space or K)'}
-                      className="p-2.5 rounded-lg bg-[#ff0033] hover:bg-[#d9002c] text-white shadow-md shadow-red-950/40 transition-colors"
-                    >
-                      {isPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white ml-0.5" />}
-                    </button>
-
-                    <button
-                      onClick={() => setCurrentTime(t => Math.min(selectedVideo.durationSeconds, t + 10))}
-                      title="Seek forward 10s (L)"
-                      className="p-2 rounded-lg text-[#9094a8] hover:text-white hover:bg-[#1a1c26] transition-colors"
-                    >
-                      <RotateCw className="w-4 h-4" />
-                    </button>
-
-                    {/* Volume Slider */}
-                    <div className="flex items-center gap-1.5 pl-2">
-                      <button
-                        onClick={() => setIsMuted(m => !m)}
-                        className="p-1.5 text-[#888c9f] hover:text-white"
-                      >
-                        {isMuted || volume === 0 ? <VolumeX className="w-4 h-4 text-red-400" /> : <Volume2 className="w-4 h-4" />}
-                      </button>
-                      <input
-                        type="range"
-                        min={0}
-                        max={100}
-                        value={isMuted ? 0 : volume}
-                        onChange={e => {
-                          setVolume(Number(e.target.value));
-                          if (isMuted) setIsMuted(false);
-                        }}
-                        className="w-16 h-1 bg-[#232636] accent-[#ff0033] rounded cursor-pointer"
-                      />
+            {/* Docked Mini-Player Bar when browsing other views */}
+            {selectedVideo && currentPage !== 'watch' && (
+              <div ref={playerContainerRef} className="border-t border-[#1e202b] bg-[#111218] px-5 py-2.5 shrink-0 shadow-2xl flex items-center justify-between gap-4">
+                {/* Left: Thumbnail & Info */}
+                <div 
+                  onClick={() => setCurrentPage('watch')} 
+                  className="flex items-center gap-3 cursor-pointer group max-w-sm truncate"
+                >
+                  <div className="relative w-14 h-9 rounded bg-[#1a1c26] overflow-hidden shrink-0 border border-[#272a3b]">
+                    <img src={selectedVideo.thumbnail} alt="" className="w-full h-full object-cover" />
+                    <div className="absolute inset-0 bg-black/30 group-hover:bg-black/10 flex items-center justify-center">
+                      <Play className="w-3.5 h-3.5 fill-white text-white opacity-80 group-hover:opacity-100" />
                     </div>
                   </div>
-
-                  {/* Center Video Info */}
-                  <div className="hidden md:flex flex-col items-center max-w-md px-2 text-center truncate">
-                    <span className="text-xs font-semibold text-white truncate max-w-full">
-                      {selectedVideo.title}
-                    </span>
-                    <span className="text-[10px] text-[#7a7f96]">
-                      {selectedVideo.channel} {selectedVideo.views ? `• ${selectedVideo.views}` : ''}
-                    </span>
+                  <div className="truncate">
+                    <p className="text-xs font-semibold text-white truncate group-hover:text-[#ff4d6d] transition-colors">{selectedVideo.title}</p>
+                    <p className="text-[11px] text-[#7d8296] truncate">{selectedVideo.channel}</p>
                   </div>
+                </div>
 
-                  {/* Right Controls */}
-                  <div className="flex items-center gap-2">
-                    {/* Like button */}
+                {/* Center: Controls */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setCurrentTime(t => Math.max(0, t - 10))}
+                    title="Seek backward 10s"
+                    className="p-1.5 rounded-lg text-[#9094a8] hover:text-white hover:bg-[#1a1c26]"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    onClick={() => setIsPlaying(p => !p)}
+                    title={isPlaying ? 'Pause' : 'Play'}
+                    className="p-2 rounded-lg bg-[#ff0033] hover:bg-[#d9002c] text-white shadow"
+                  >
+                    {isPlaying ? <Pause className="w-3.5 h-3.5 fill-white" /> : <Play className="w-3.5 h-3.5 fill-white ml-0.5" />}
+                  </button>
+                  <button
+                    onClick={() => setCurrentTime(t => Math.min(selectedVideo.durationSeconds, t + 10))}
+                    title="Seek forward 10s"
+                    className="p-1.5 rounded-lg text-[#9094a8] hover:text-white hover:bg-[#1a1c26]"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
+                  </button>
+
+                  <div className="hidden sm:flex items-center gap-1.5 pl-3 border-l border-[#20222e]">
                     <button
-                      onClick={() => {
-                        setLikedList(prev =>
-                          prev.includes(selectedVideo.id)
-                            ? prev.filter(id => id !== selectedVideo.id)
-                            : [...prev, selectedVideo.id]
-                        );
-                        showNotification(likedList.includes(selectedVideo.id) ? 'Removed like' : 'Liked video');
+                      onClick={() => setIsMuted(m => !m)}
+                      className="p-1 text-[#888c9f] hover:text-white"
+                    >
+                      {isMuted || volume === 0 ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-[#7d8296]" />}
+                    </button>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={isMuted ? 0 : volume}
+                      onChange={e => {
+                        setVolume(Number(e.target.value));
+                        if (isMuted) setIsMuted(false);
                       }}
-                      title="Like Video"
-                      className={`p-2 rounded-lg transition-colors ${
-                        likedList.includes(selectedVideo.id)
-                          ? 'text-[#ff4d6d] bg-[#ff0033]/15'
-                          : 'text-[#8a8f9f] hover:text-white hover:bg-[#1a1c26]'
-                      }`}
-                    >
-                      <ThumbsUp className="w-4 h-4" />
-                    </button>
-
-                    {/* Speed Selector */}
-                    <select
-                      value={speed}
-                      onChange={e => setSpeed(Number(e.target.value))}
-                      className="bg-[#181922] border border-[#272938] text-xs text-[#cfd3e4] rounded px-2 py-1 font-mono focus:outline-none cursor-pointer"
-                    >
-                      <option value={0.5}>0.5x</option>
-                      <option value={0.75}>0.75x</option>
-                      <option value={1.0}>1.0x</option>
-                      <option value={1.25}>1.25x</option>
-                      <option value={1.5}>1.5x</option>
-                      <option value={2.0}>2.0x</option>
-                    </select>
-
-                    {/* Quality Selector */}
-                    <select
-                      value={quality}
-                      onChange={e => setQuality(e.target.value)}
-                      className="bg-[#181922] border border-[#272938] text-xs text-[#cfd3e4] rounded px-2 py-1 font-mono focus:outline-none cursor-pointer"
-                    >
-                      <option value="360p">360p</option>
-                      <option value="480p">480p</option>
-                      <option value="720p">720p</option>
-                      <option value="1080p">1080p</option>
-                      <option value="1440p">1440p</option>
-                      <option value="4K">4K</option>
-                    </select>
-
-                    {/* Fullscreen */}
-                    <button
-                      onClick={() => setIsFullscreen(f => !f)}
-                      title="Toggle Fullscreen (F)"
-                      className="p-2 rounded-lg text-[#8a8f9f] hover:text-white hover:bg-[#1a1c26] transition-colors"
-                    >
-                      {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-                    </button>
+                      className="w-16 h-1 bg-[#232636] accent-[#ff0033] rounded cursor-pointer"
+                    />
                   </div>
+                </div>
+
+                {/* Right: Expand and Close */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setCurrentPage('watch')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-[#1a1c26] hover:bg-[#222533] text-xs text-white rounded-md border border-[#2b2e40] font-medium transition-colors"
+                  >
+                    <Maximize2 className="w-3.5 h-3.5" />
+                    <span>Watch View</span>
+                  </button>
+                  <button
+                    onClick={() => setSelectedVideo(null)}
+                    title="Close player"
+                    className="p-1.5 text-[#7b8094] hover:text-white hover:bg-[#1a1c26] rounded-md transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
             )}

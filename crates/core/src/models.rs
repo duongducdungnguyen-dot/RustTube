@@ -95,6 +95,7 @@ pub enum YouTubeUrlType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AppPage {
     Home,
+    Watch(String),
     Search,
     Subscriptions,
     Playlists,

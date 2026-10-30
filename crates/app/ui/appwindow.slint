@@ -39,14 +39,12 @@ component VideoCard inherits Rectangle {
         padding: 8px;
         spacing: 6px;
 
-        // Thumbnail placeholder/container
         Rectangle {
             height: 140px;
             background: #1b1c26;
             border-radius: 6px;
             clip: true;
 
-            // Duration badge
             Rectangle {
                 x: parent.width - self.width - 6px;
                 y: parent.height - self.height - 6px;
@@ -65,7 +63,6 @@ component VideoCard inherits Rectangle {
             }
         }
 
-        // Title
         Text {
             text: root.data.title;
             color: #f0f0f5;
@@ -103,12 +100,18 @@ export component AppWindow inherits Window {
     in-out property <string> search_query: "";
     in-out property <string> current_video_id: "";
     in-out property <string> current_video_title: "";
+    in-out property <string> current_video_channel: "";
+    in-out property <string> current_video_views: "";
+    in-out property <string> current_video_published: "";
+    in-out property <string> current_video_description: "";
+    in-out property <string> current_quality: "1080p";
+    in-out property <float> current_speed: 1.0;
+    in-out property <int> volume_val: 80;
     in-out property <bool> is_playing: false;
     in-out property <bool> is_loading: false;
     in-out property <float> playback_position: 0.0;
     in-out property <float> playback_duration: 100.0;
     in-out property <string> time_display: "0:00 / 0:00";
-    in-out property <int> volume_val: 80;
     in-out property <string> user_display_name: "Sign In";
     in-out property <bool> is_logged_in: false;
     in-out property <string> status_message: "";
@@ -118,7 +121,7 @@ export component AppWindow inherits Window {
 
     callback navigate(string);
     callback search_submitted(string);
-    callback video_selected(string, string);
+    callback video_selected(string, string, string);
     callback toggle_play_pause();
     callback seek_requested(float);
     callback volume_changed(int);
@@ -127,7 +130,7 @@ export component AppWindow inherits Window {
     callback toggle_fullscreen();
     callback toggle_subtitles();
     callback toggle_like(string);
-    callback toggle_watch_later(string);
+    callback toggle_watch_later(string, string, string, string);
     callback login_google();
     callback logout_google();
     callback clear_history();
@@ -136,7 +139,7 @@ export component AppWindow inherits Window {
     HorizontalLayout {
         // Navigation Sidebar
         Rectangle {
-            width: 220px;
+            width: 210px;
             background: #121319;
             border-color: #1e2029;
             border-width: 1px;
@@ -172,7 +175,6 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 16px; }
 
-                // Navigation Items
                 Button {
                     text: "Home";
                     clicked => { root.navigate("home"); }
@@ -218,7 +220,7 @@ export component AppWindow inherits Window {
                     spacing: 14px;
 
                     search_input := LineEdit {
-                        placeholder-text: "Search YouTube (Press Enter)...";
+                        placeholder-text: "Search YouTube or paste URL (Press Enter)...";
                         horizontal-stretch: 1;
                         accepted => {
                             root.search_submitted(self.text);
@@ -264,8 +266,223 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                // Dedicated Watch Page
+                if root.current_page == "watch": ScrollView {
+                    viewport-width: parent.width;
+
+                    VerticalLayout {
+                        padding: 24px;
+                        spacing: 16px;
+
+                        // Top Navigation row
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Button {
+                                text: "← Back to Browse";
+                                clicked => { root.navigate("home"); }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+
+                        // Native Video Rendering Area
+                        Rectangle {
+                            height: 480px;
+                            background: #000000;
+                            border-radius: 8px;
+                            border-color: #212330;
+                            border-width: 1px;
+                            clip: true;
+
+                            // Video surface placeholder overlay
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 8px;
+                                if !root.is_playing: Text {
+                                    text: "▶ Press Play to start video";
+                                    color: #5d6174;
+                                    font-size: 14px;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        // Integrated Controls under the video
+                        Rectangle {
+                            height: 80px;
+                            background: #13141b;
+                            border-color: #20222d;
+                            border-width: 1px;
+                            border-radius: 8px;
+
+                            VerticalLayout {
+                                padding: 10px;
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                spacing: 6px;
+
+                                // Scrubber Slider
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Slider {
+                                        minimum: 0.0;
+                                        maximum: root.playback_duration;
+                                        value: root.playback_position;
+                                        changed(val) => {
+                                            root.seek_requested(val);
+                                        }
+                                    }
+                                    Text {
+                                        text: root.time_display;
+                                        color: #8c90a4;
+                                        font-size: 11px;
+                                        vertical-alignment: center;
+                                    }
+                                }
+
+                                // Interactive Buttons
+                                HorizontalLayout {
+                                    spacing: 10px;
+
+                                    Button {
+                                        text: root.is_playing ? "Pause" : "Play";
+                                        clicked => { root.toggle_play_pause(); }
+                                    }
+
+                                    Button {
+                                        text: "-10s";
+                                        clicked => { root.seek_requested(root.playback_position - 10.0); }
+                                    }
+
+                                    Button {
+                                        text: "+10s";
+                                        clicked => { root.seek_requested(root.playback_position + 10.0); }
+                                    }
+
+                                    Rectangle { width: 10px; }
+
+                                    Text {
+                                        text: "Vol:";
+                                        font-size: 11px;
+                                        color: #8c90a4;
+                                        vertical-alignment: center;
+                                    }
+
+                                    Slider {
+                                        width: 100px;
+                                        minimum: 0.0;
+                                        maximum: 100.0;
+                                        value: root.volume_val;
+                                        changed(val) => {
+                                            root.volume_changed(floor(val));
+                                        }
+                                    }
+
+                                    Text {
+                                        text: root.volume_val + "%";
+                                        font-size: 11px;
+                                        color: #8c90a4;
+                                        vertical-alignment: center;
+                                        width: 32px;
+                                    }
+
+                                    Rectangle { horizontal-stretch: 1; }
+
+                                    // Speed buttons
+                                    Button {
+                                        text: "0.5x";
+                                        clicked => { root.speed_changed(0.5); }
+                                    }
+                                    Button {
+                                        text: "1.0x";
+                                        clicked => { root.speed_changed(1.0); }
+                                    }
+                                    Button {
+                                        text: "1.5x";
+                                        clicked => { root.speed_changed(1.5); }
+                                    }
+                                    Button {
+                                        text: "2.0x";
+                                        clicked => { root.speed_changed(2.0); }
+                                    }
+
+                                    Rectangle { width: 6px; }
+
+                                    // Quality cycle button
+                                    Button {
+                                        text: root.current_quality;
+                                        clicked => {
+                                            if (root.current_quality == "1080p") {
+                                                root.quality_changed("720p");
+                                            } else if (root.current_quality == "720p") {
+                                                root.quality_changed("480p");
+                                            } else if (root.current_quality == "480p") {
+                                                root.quality_changed("Auto");
+                                            } else {
+                                                root.quality_changed("1080p");
+                                            }
+                                        }
+                                    }
+
+                                    Button {
+                                        text: "Fullscreen";
+                                        clicked => { root.toggle_fullscreen(); }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Video Title and Channel Information
+                        VerticalLayout {
+                            spacing: 6px;
+                            Text {
+                                text: root.current_video_title;
+                                color: #ffffff;
+                                font-size: 18px;
+                                font-weight: 700;
+                            }
+
+                            HorizontalLayout {
+                                spacing: 12px;
+                                Text {
+                                    text: root.current_video_channel;
+                                    color: #a0a4b8;
+                                    font-size: 13px;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: root.current_video_views;
+                                    color: #787d92;
+                                    font-size: 12px;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+
+                                Button {
+                                    text: "Save to Watch Later";
+                                    clicked => { root.toggle_watch_later(root.current_video_id, root.current_video_title, root.current_video_channel, ""); }
+                                }
+                            }
+                        }
+
+                        // Video Description Box
+                        if root.current_video_description != "": Rectangle {
+                            background: #13141b;
+                            border-color: #20222d;
+                            border-width: 1px;
+                            border-radius: 8px;
+                            padding: 14px;
+
+                            Text {
+                                text: root.current_video_description;
+                                color: #c4c8d8;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
                 // Empty State
-                if !root.is_loading && root.current_page != "settings" && root.video_list.length == 0: VerticalLayout {
+                if !root.is_loading && root.current_page != "settings" && root.current_page != "watch" && root.video_list.length == 0: VerticalLayout {
                     alignment: center;
                     spacing: 10px;
                     Text {
@@ -283,15 +500,14 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Video Grid ScrollView
-                if !root.is_loading && root.current_page != "settings" && root.video_list.length > 0: ScrollView {
+                // Video Grid ScrollView (Home / History / Watch Later)
+                if !root.is_loading && root.current_page != "settings" && root.current_page != "watch" && root.video_list.length > 0: ScrollView {
                     viewport-width: parent.width;
 
                     VerticalLayout {
                         padding: 20px;
                         spacing: 16px;
 
-                        // Status notification if active
                         if root.status_message != "": Rectangle {
                             height: 36px;
                             background: #1b1e2c;
@@ -316,10 +532,14 @@ export component AppWindow inherits Window {
                                 height: 220px;
                                 data: video;
                                 clicked => {
-                                    root.video_selected(video.id, video.title);
+                                    root.current_video_id = video.id;
+                                    root.current_video_title = video.title;
+                                    root.current_video_channel = video.channel;
+                                    root.current_video_views = video.views;
+                                    root.video_selected(video.id, video.title, video.channel);
                                 }
                                 watch_later_clicked => {
-                                    root.toggle_watch_later(video.id);
+                                    root.toggle_watch_later(video.id, video.title, video.channel, video.thumbnail_url);
                                 }
                             }
                         }
@@ -344,7 +564,7 @@ export component AppWindow inherits Window {
                     }
 
                     Text {
-                        text: "Account";
+                        text: "Google Account";
                         color: #ffffff;
                         font-size: 15px;
                         font-weight: 600;
@@ -372,7 +592,7 @@ export component AppWindow inherits Window {
                     Rectangle { height: 8px; }
 
                     Text {
-                        text: "Local Data";
+                        text: "Local Storage";
                         color: #ffffff;
                         font-size: 15px;
                         font-weight: 600;
@@ -392,56 +612,27 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Bottom Player Bar
-            if root.current_video_id != "": Rectangle {
-                height: 70px;
+            // Bottom Mini Player Bar (shown only when browsing other pages while a video is loaded)
+            if root.current_page != "watch" && root.current_video_id != "": Rectangle {
+                height: 64px;
                 background: #111218;
                 border-color: #1e2029;
                 border-width: 1px;
 
-                VerticalLayout {
-                    padding: 8px;
+                HorizontalLayout {
                     padding-left: 16px;
                     padding-right: 16px;
-                    spacing: 4px;
+                    spacing: 12px;
 
-                    // Timeline Slider
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Slider {
-                            minimum: 0.0;
-                            maximum: root.playback_duration;
-                            value: root.playback_position;
-                            changed(val) => {
-                                root.seek_requested(val);
-                            }
-                        }
-                        Text {
-                            text: root.time_display;
-                            color: #8c90a4;
-                            font-size: 11px;
-                            vertical-alignment: center;
-                        }
+                    Button {
+                        text: root.is_playing ? "Pause" : "Play";
+                        clicked => { root.toggle_play_pause(); }
                     }
 
-                    // Player Controls
-                    HorizontalLayout {
-                        spacing: 12px;
-
-                        Button {
-                            text: root.is_playing ? "Pause" : "Play";
-                            clicked => { root.toggle_play_pause(); }
-                        }
-
-                        Button {
-                            text: "-10s";
-                            clicked => { root.seek_requested(root.playback_position - 10.0); }
-                        }
-
-                        Button {
-                            text: "+10s";
-                            clicked => { root.seek_requested(root.playback_position + 10.0); }
-                        }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        horizontal-stretch: 1;
 
                         Text {
                             text: root.current_video_title;
@@ -449,14 +640,18 @@ export component AppWindow inherits Window {
                             font-size: 12px;
                             font-weight: 600;
                             overflow: elide;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
                         }
 
-                        Button {
-                            text: "Fullscreen";
-                            clicked => { root.toggle_fullscreen(); }
+                        Text {
+                            text: root.current_video_channel + " • " + root.time_display;
+                            color: #8c90a4;
+                            font-size: 11px;
                         }
+                    }
+
+                    Button {
+                        text: "Open Player →";
+                        clicked => { root.navigate("watch"); }
                     }
                 }
             }

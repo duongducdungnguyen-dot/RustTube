@@ -179,12 +179,7 @@ impl MpvInstance {
     }
 
     pub fn toggle_pause(&self) -> Result<()> {
-        let is_paused = self.get_property("pause").map(|s| s == "yes").unwrap_or(false);
-        if is_paused {
-            self.play()
-        } else {
-            self.pause()
-        }
+        self.command(&["cycle", "pause"])
     }
 
     pub fn seek_relative(&self, seconds: f64) -> Result<()> {

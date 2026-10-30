@@ -5,7 +5,7 @@ pub enum UiCommand {
     Navigate(AppPage),
     Search(String),
     LoadMoreSearch,
-    PlayVideo { video_id: String, quality: String },
+    PlayVideo { video_id: String, title: String, channel: String, quality: String },
     TogglePlayPause,
     SeekRelative(f64),
     SeekAbsolute(f64),

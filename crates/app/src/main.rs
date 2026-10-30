@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
 
     let config = AppConfig::load_or_default("config.toml");
 
-    let thumbnail_cache = ThumbnailCache::new(&config.cache.thumbnail_dir, config.cache.disk_cache_mb);
+    let thumbnail_cache = Arc::new(ThumbnailCache::new(&config.cache.thumbnail_dir, config.cache.disk_cache_mb));
     let history_store = HistoryStore::new("cache/history.json", config.cache.max_history_items);
     let watch_later_store = WatchLaterStore::new("cache/watch_later.json");
 
@@ -48,11 +48,32 @@ async fn main() -> Result<()> {
     let app_window = AppWindow::new()?;
     let window_weak = app_window.as_weak();
 
-    // Hook Slint UI Callbacks
+    // On Windows, locate the top-level native HWND and connect to player wid
+    #[cfg(target_os = "windows")]
+    {
+        unsafe {
+            use windows_sys::Win32::UI::WindowsAndMessaging::*;
+            let title_u16: Vec<u16> = "RustTube\0".encode_utf16().collect();
+            let hwnd = FindWindowW(std::ptr::null(), title_u16.as_ptr());
+            if hwnd != 0 {
+                info!("Bound native RustTube HWND: {}", hwnd);
+                let mut p = player.lock().await;
+                p.set_window_id(hwnd as isize);
+            }
+        }
+    }
+
+    // Set initial configuration values in Slint UI
+    app_window.set_volume_val(config.player.volume as i32);
+    app_window.set_current_speed(config.player.speed);
+    app_window.set_current_quality(config.player.preferred_quality.clone().into());
+
+    // Hook Slint UI Callbacks to Tokio Channel
     {
         let tx = cmd_tx.clone();
         app_window.on_navigate(move |page_str| {
             let page = match page_str.as_str() {
+                "watch" => AppPage::Watch(String::new()),
                 "subscriptions" => AppPage::Subscriptions,
                 "playlists" => AppPage::Playlists,
                 "watch_later" => AppPage::WatchLater,
@@ -73,11 +94,35 @@ async fn main() -> Result<()> {
 
     {
         let tx = cmd_tx.clone();
-        app_window.on_video_selected(move |id, title| {
+        let preferred_q = config.player.preferred_quality.clone();
+        app_window.on_video_selected(move |id, title, channel| {
             let _ = tx.blocking_send(UiCommand::PlayVideo {
                 video_id: id.to_string(),
-                quality: "1080p".to_string(),
+                title: title.to_string(),
+                channel: channel.to_string(),
+                quality: preferred_q.clone(),
             });
+        });
+    }
+
+    {
+        let tx = cmd_tx.clone();
+        app_window.on_volume_changed(move |v| {
+            let _ = tx.blocking_send(UiCommand::SetVolume(v as u32));
+        });
+    }
+
+    {
+        let tx = cmd_tx.clone();
+        app_window.on_speed_changed(move |s| {
+            let _ = tx.blocking_send(UiCommand::SetSpeed(s));
+        });
+    }
+
+    {
+        let tx = cmd_tx.clone();
+        app_window.on_quality_changed(move |q| {
+            let _ = tx.blocking_send(UiCommand::SetQuality(q.to_string()));
         });
     }
 
@@ -104,6 +149,48 @@ async fn main() -> Result<()> {
 
     {
         let tx = cmd_tx.clone();
+        app_window.on_toggle_subtitles(move || {
+            let _ = tx.blocking_send(UiCommand::ToggleSubtitles);
+        });
+    }
+
+    {
+        let tx = cmd_tx.clone();
+        let wl_store = watch_later_store.clone();
+        let win = window_weak.clone();
+        app_window.on_toggle_watch_later(move |vid, title, channel, thumb| {
+            let store = wl_store.clone();
+            let v_str = vid.to_string();
+            let t_str = title.to_string();
+            let c_str = channel.to_string();
+            let th_str = thumb.to_string();
+            let w = win.clone();
+            tokio::spawn(async move {
+                let item = VideoItem {
+                    id: v_str.clone(),
+                    title: if t_str.is_empty() { format!("Video {}", v_str) } else { t_str },
+                    channel_name: if c_str.is_empty() { "YouTube".into() } else { c_str },
+                    channel_id: "".into(),
+                    duration_seconds: 0,
+                    duration_string: "--:--".into(),
+                    view_count: 0,
+                    thumbnail_url: th_str,
+                    published_time: "".into(),
+                };
+                if let Ok(saved) = store.toggle(item).await {
+                    let msg = if saved { "Saved to Watch Later" } else { "Removed from Watch Later" };
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = w.upgrade() {
+                            ui.set_status_message(msg.into());
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    {
+        let tx = cmd_tx.clone();
         app_window.on_login_google(move || {
             let _ = tx.blocking_send(UiCommand::StartGoogleLogin);
         });
@@ -123,7 +210,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Check existing sign-in status on startup
+    // Startup Authentication Check
     if let Ok(Some(token)) = auth_manager.get_access_token().await {
         if let Ok((channel_title, _, _)) = api_client.get_my_channel(&token).await {
             let win = window_weak.clone();
@@ -136,13 +223,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Initial load: Home feed
+    // Load initial feed
     let initial_tx = cmd_tx.clone();
     tokio::spawn(async move {
         let _ = initial_tx.send(UiCommand::Navigate(AppPage::Home)).await;
     });
 
-    // Background Service Loop (All UI updates dispatched via invoke_from_event_loop)
+    // Background Service Loop (UI updates executed via invoke_from_event_loop)
     let worker_player = player.clone();
     let worker_ytdlp = ytdlp.clone();
     let worker_auth = auth_manager.clone();
@@ -152,10 +239,15 @@ async fn main() -> Result<()> {
     let worker_window = window_weak.clone();
 
     tokio::spawn(async move {
+        let mut active_video_id = String::new();
+        let mut active_video_title = String::new();
+        let mut active_video_channel = String::new();
+
         while let Some(cmd) = cmd_rx.recv().await {
             match cmd {
                 UiCommand::Navigate(page) => {
                     let page_name = match page {
+                        AppPage::Watch(_) => "watch",
                         AppPage::Subscriptions => "subscriptions",
                         AppPage::Playlists => "playlists",
                         AppPage::WatchLater => "watch_later",
@@ -169,7 +261,9 @@ async fn main() -> Result<()> {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(w) = win.upgrade() {
                             w.set_current_page(page_clone.into());
-                            w.set_is_loading(true);
+                            if page_clone != "watch" && page_clone != "settings" {
+                                w.set_is_loading(true);
+                            }
                         }
                     });
 
@@ -212,14 +306,6 @@ async fn main() -> Result<()> {
                                 }
                             });
                         }
-                        AppPage::Settings => {
-                            let win = worker_window.clone();
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(w) = win.upgrade() {
-                                    w.set_is_loading(false);
-                                }
-                            });
-                        }
                         _ => {}
                     }
                 }
@@ -230,25 +316,49 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    // Check if query is a direct YouTube URL
                     match YouTubeUrlParser::parse(&query) {
                         YouTubeUrlType::Video(id) | YouTubeUrlType::Shorts(id) => {
                             let win = worker_window.clone();
                             let id_clone = id.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(w) = win.upgrade() {
-                                    w.set_status_message(format!("Loading video {}...", id_clone).into());
+                                    w.set_current_page("watch".into());
+                                    w.set_current_video_id(id_clone.clone().into());
+                                    w.set_status_message(format!("Resolving video {}...", id_clone).into());
                                 }
                             });
+
+                            let ytdlp_meta = worker_ytdlp.clone();
+                            let win_meta = worker_window.clone();
+                            let id_meta = id.clone();
+                            let video_meta = ytdlp_meta.get_video_detail(&id_meta).await.ok();
+
+                            let final_title = video_meta.as_ref().map(|d| d.title.clone()).unwrap_or_else(|| format!("YouTube Video ({})", id_meta));
+                            let final_channel = video_meta.as_ref().map(|d| d.channel.clone()).unwrap_or_else(|| "YouTube".to_string());
+                            let final_desc = video_meta.as_ref().map(|d| d.description.clone()).unwrap_or_default();
+
+                            let win_set = win_meta.clone();
+                            let t_set = final_title.clone();
+                            let c_set = final_channel.clone();
+                            let d_set = final_desc.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win_set.upgrade() {
+                                    w.set_current_video_title(t_set.into());
+                                    w.set_current_video_channel(c_set.into());
+                                    w.set_current_video_description(d_set.into());
+                                }
+                            });
+
                             match worker_ytdlp.get_stream_info(&id, "1080p").await {
                                 Ok(stream) => {
                                     let p = worker_player.lock().await;
-                                    let _ = p.play_stream(&stream, &id, &id).await;
+                                    let _ = p.play_stream(&stream, &id, &final_title).await;
                                     let win = worker_window.clone();
+                                    let actual_res = stream.resolution.clone();
                                     let _ = slint::invoke_from_event_loop(move || {
                                         if let Some(w) = win.upgrade() {
-                                            w.set_current_video_id(id.into());
                                             w.set_is_playing(true);
+                                            w.set_current_quality(actual_res.into());
                                             w.set_status_message("".into());
                                         }
                                     });
@@ -265,7 +375,6 @@ async fn main() -> Result<()> {
                             }
                         }
                         _ => {
-                            // Keyword search
                             let win = worker_window.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(w) = win.upgrade() {
@@ -280,33 +389,67 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                UiCommand::PlayVideo { video_id, quality } => {
+                UiCommand::PlayVideo { video_id, title, channel, quality } => {
+                    active_video_id = video_id.clone();
+                    active_video_title = title.clone();
+                    active_video_channel = channel.clone();
+
                     let win = worker_window.clone();
                     let vid = video_id.clone();
+                    let t_clone = title.clone();
+                    let c_clone = channel.clone();
+                    let q_clone = quality.clone();
+
+                    // Switch immediately to dedicated Watch page
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(w) = win.upgrade() {
+                            w.set_current_page("watch".into());
                             w.set_current_video_id(vid.into());
-                            w.set_status_message("Connecting stream...".into());
+                            w.set_current_video_title(t_clone.into());
+                            w.set_current_video_channel(c_clone.into());
+                            w.set_current_quality(q_clone.into());
+                            w.set_status_message("Extracting playable streams...".into());
                         }
                     });
 
+                    // Retrieve description and metadata in background
+                    let ytdlp_desc = worker_ytdlp.clone();
+                    let win_desc = worker_window.clone();
+                    let vid_desc = video_id.clone();
+                    tokio::spawn(async move {
+                        if let Ok(detail) = ytdlp_desc.get_video_detail(&vid_desc).await {
+                            let d = detail.description;
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win_desc.upgrade() {
+                                    w.set_current_video_description(d.into());
+                                }
+                            });
+                        }
+                    });
+
+                    // Resolve audio and video streams
                     match worker_ytdlp.get_stream_info(&video_id, &quality).await {
                         Ok(stream) => {
                             let p = worker_player.lock().await;
-                            let _ = p.play_stream(&stream, &video_id, &video_id).await;
+                            if let Err(e) = p.play_stream(&stream, &video_id, &title).await {
+                                error!("Playback start failed: {}", e);
+                            }
 
                             let win = worker_window.clone();
+                            let actual_res = stream.resolution.clone();
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(w) = win.upgrade() {
                                     w.set_is_playing(true);
+                                    w.set_current_quality(actual_res.into());
                                     w.set_status_message("".into());
                                 }
                             });
 
+                            // Record actual video metadata to local history
                             let _ = worker_history.record(VideoItem {
                                 id: video_id.clone(),
-                                title: format!("Video {}", video_id),
-                                channel_name: "YouTube".into(),
+                                title: title.clone(),
+                                channel_name: channel.clone(),
                                 channel_id: "".into(),
                                 duration_seconds: 0,
                                 duration_string: "--:--".into(),
@@ -317,7 +460,7 @@ async fn main() -> Result<()> {
                         }
                         Err(e) => {
                             let win = worker_window.clone();
-                            let err_msg = format!("Playback error: {}", e);
+                            let err_msg = format!("{}", e);
                             let _ = slint::invoke_from_event_loop(move || {
                                 if let Some(w) = win.upgrade() {
                                     w.set_status_message(err_msg.into());
@@ -330,6 +473,79 @@ async fn main() -> Result<()> {
                 UiCommand::TogglePlayPause => {
                     let p = worker_player.lock().await;
                     let _ = p.handle_command(UiCommand::TogglePlayPause).await;
+                    let status = p.poll_status().await;
+                    let win = worker_window.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.set_is_playing(status.is_playing);
+                        }
+                    });
+                }
+
+                UiCommand::SetVolume(vol) => {
+                    let p = worker_player.lock().await;
+                    let _ = p.handle_command(UiCommand::SetVolume(vol)).await;
+                    let win = worker_window.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.set_volume_val(vol as i32);
+                        }
+                    });
+                }
+
+                UiCommand::SetSpeed(speed) => {
+                    let p = worker_player.lock().await;
+                    let _ = p.handle_command(UiCommand::SetSpeed(speed)).await;
+                    let win = worker_window.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.set_current_speed(speed);
+                        }
+                    });
+                }
+
+                UiCommand::SetQuality(quality) => {
+                    if active_video_id.is_empty() {
+                        continue;
+                    }
+                    let vid = active_video_id.clone();
+                    let title = active_video_title.clone();
+                    let win = worker_window.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.set_status_message(format!("Switching quality to {}...", quality).into());
+                        }
+                    });
+
+                    let p_lock = worker_player.lock().await;
+                    let current_pos = p_lock.poll_status().await.position_seconds;
+                    drop(p_lock);
+
+                    match worker_ytdlp.get_stream_info(&vid, &quality).await {
+                        Ok(stream) => {
+                            let p = worker_player.lock().await;
+                            let _ = p.play_stream(&stream, &vid, &title).await;
+                            let _ = p.seek_absolute(current_pos).await;
+                            let win = worker_window.clone();
+                            let actual_res = stream.resolution.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_current_quality(actual_res.into());
+                                    w.set_is_playing(true);
+                                    w.set_status_message("".into());
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            let win = worker_window.clone();
+                            let err_msg = format!("Quality switch error: {}", e);
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_status_message(err_msg.into());
+                                }
+                            });
+                        }
+                    }
                 }
 
                 UiCommand::SeekAbsolute(pos) => {
@@ -340,6 +556,11 @@ async fn main() -> Result<()> {
                 UiCommand::ToggleFullscreen => {
                     let p = worker_player.lock().await;
                     let _ = p.handle_command(UiCommand::ToggleFullscreen).await;
+                }
+
+                UiCommand::ToggleSubtitles => {
+                    let p = worker_player.lock().await;
+                    let _ = p.handle_command(UiCommand::ToggleSubtitles).await;
                 }
 
                 UiCommand::StartGoogleLogin => {
@@ -356,20 +577,31 @@ async fn main() -> Result<()> {
 
                         match auth.start_oauth_flow().await {
                             Ok(token) => {
-                                if let Ok((title, _, _)) = api.get_my_channel(&token).await {
-                                    let win2 = win.clone();
-                                    let _ = slint::invoke_from_event_loop(move || {
-                                        if let Some(w) = win2.upgrade() {
-                                            w.set_is_logged_in(true);
-                                            w.set_user_display_name(title.into());
-                                            w.set_status_message("Signed in successfully.".into());
-                                        }
-                                    });
+                                match api.get_my_channel(&token).await {
+                                    Ok((title, _, _)) => {
+                                        let win2 = win.clone();
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(w) = win2.upgrade() {
+                                                w.set_is_logged_in(true);
+                                                w.set_user_display_name(title.into());
+                                                w.set_status_message("Signed in successfully.".into());
+                                            }
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let win2 = win.clone();
+                                        let err_msg = format!("Authenticated, but could not load YouTube channel: {}", e);
+                                        let _ = slint::invoke_from_event_loop(move || {
+                                            if let Some(w) = win2.upgrade() {
+                                                w.set_status_message(err_msg.into());
+                                            }
+                                        });
+                                    }
                                 }
                             }
                             Err(e) => {
                                 let win2 = win.clone();
-                                let err_msg = format!("Authentication error: {}", e);
+                                let err_msg = format!("Google sign in error: {}", e);
                                 let _ = slint::invoke_from_event_loop(move || {
                                     if let Some(w) = win2.upgrade() {
                                         w.set_status_message(err_msg.into());
@@ -387,7 +619,7 @@ async fn main() -> Result<()> {
                         if let Some(w) = win.upgrade() {
                             w.set_is_logged_in(false);
                             w.set_user_display_name("Sign In".into());
-                            w.set_status_message("Signed out.".into());
+                            w.set_status_message("Signed out and cleared credentials.".into());
                         }
                     });
                 }
