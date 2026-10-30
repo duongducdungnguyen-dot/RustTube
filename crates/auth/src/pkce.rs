@@ -8,6 +8,7 @@ use oauth2::{
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -15,18 +16,16 @@ use tokio::sync::Mutex;
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthTokens {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_in_seconds: u64,
+struct CachedToken {
+    access_token: String,
+    expires_at: Instant,
 }
 
 pub struct GoogleAuthManager {
     client_id: String,
     redirect_port: u16,
     token_store: SecureTokenStore,
-    current_access_token: Arc<Mutex<Option<String>>>,
+    current_token: Arc<Mutex<Option<CachedToken>>>,
 }
 
 impl GoogleAuthManager {
@@ -35,7 +34,7 @@ impl GoogleAuthManager {
             client_id: client_id.to_string(),
             redirect_port,
             token_store: SecureTokenStore::new(service_name, "personal_account"),
-            current_access_token: Arc::new(Mutex::new(None)),
+            current_token: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -45,17 +44,31 @@ impl GoogleAuthManager {
 
     pub async fn get_access_token(&self) -> Result<Option<String>> {
         {
-            let current = self.current_access_token.lock().await;
-            if let Some(token) = current.as_ref() {
-                return Ok(Some(token.clone()));
+            let current = self.current_token.lock().await;
+            if let Some(ref cached) = *current {
+                if cached.expires_at > Instant::now() + Duration::from_secs(60) {
+                    return Ok(Some(cached.access_token.clone()));
+                }
             }
         }
 
         if let Ok(Some(refresh_token)) = self.token_store.get_refresh_token() {
-            if let Ok(new_token) = self.refresh_access_token(&refresh_token).await {
-                let mut current = self.current_access_token.lock().await;
-                *current = Some(new_token.clone());
-                return Ok(Some(new_token));
+            match self.refresh_access_token(&refresh_token).await {
+                Ok((new_token, expires_in)) => {
+                    let mut current = self.current_token.lock().await;
+                    *current = Some(CachedToken {
+                        access_token: new_token.clone(),
+                        expires_at: Instant::now() + Duration::from_secs(expires_in),
+                    });
+                    return Ok(Some(new_token));
+                }
+                Err(e) => {
+                    // Revoked or invalid token
+                    let _ = self.token_store.delete_refresh_token();
+                    let mut current = self.current_token.lock().await;
+                    *current = None;
+                    return Err(anyhow!("Session expired or revoked. Please sign in again: {}", e));
+                }
             }
         }
 
@@ -91,13 +104,17 @@ impl GoogleAuthManager {
 
         let token_resp = self.exchange_code(&code, pkce_verifier).await?;
         let access_token = token_resp.access_token().secret().to_string();
+        let expires_in = token_resp.expires_in().map(|d| d.as_secs()).unwrap_or(3600);
 
         if let Some(refresh_token) = token_resp.refresh_token() {
             let _ = self.token_store.save_refresh_token(refresh_token.secret());
         }
 
-        let mut current = self.current_access_token.lock().await;
-        *current = Some(access_token.clone());
+        let mut current = self.current_token.lock().await;
+        *current = Some(CachedToken {
+            access_token: access_token.clone(),
+            expires_at: Instant::now() + Duration::from_secs(expires_in),
+        });
 
         Ok(access_token)
     }
@@ -172,7 +189,7 @@ impl GoogleAuthManager {
         Ok(token_result)
     }
 
-    async fn refresh_access_token(&self, refresh_token: &str) -> Result<String> {
+    async fn refresh_access_token(&self, refresh_token: &str) -> Result<(String, u64)> {
         let client = reqwest::Client::new();
         let params = [
             ("client_id", self.client_id.as_str()),
@@ -195,14 +212,15 @@ impl GoogleAuthManager {
             .as_str()
             .ok_or_else(|| anyhow!("No access_token in refresh response"))?
             .to_string();
+        let expires_in = body["expires_in"].as_u64().unwrap_or(3600);
 
-        Ok(access_token)
+        Ok((access_token, expires_in))
     }
 
     pub async fn logout(&self) -> Result<()> {
-        let mut current = self.current_access_token.lock().await;
+        let mut current = self.current_token.lock().await;
         *current = None;
-        self.token_store.delete_refresh_token()?;
+        let _ = self.token_store.delete_refresh_token();
         Ok(())
     }
 }

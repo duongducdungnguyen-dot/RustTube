@@ -26,10 +26,10 @@ component VideoCard inherits Rectangle {
     callback clicked();
     callback watch_later_clicked();
 
-    background: #16171d;
+    background: #15161c;
     border-radius: 8px;
     border-width: 1px;
-    border-color: #242531;
+    border-color: #21222c;
 
     TouchArea {
         clicked => { root.clicked(); }
@@ -39,10 +39,10 @@ component VideoCard inherits Rectangle {
         padding: 8px;
         spacing: 6px;
 
-        // Thumbnail container
+        // Thumbnail placeholder/container
         Rectangle {
             height: 140px;
-            background: #20222e;
+            background: #1b1c26;
             border-radius: 6px;
             clip: true;
 
@@ -65,7 +65,7 @@ component VideoCard inherits Rectangle {
             }
         }
 
-        // Title and channel info
+        // Title
         Text {
             text: root.data.title;
             color: #f0f0f5;
@@ -97,21 +97,21 @@ export component AppWindow inherits Window {
     title: "RustTube";
     preferred-width: 1380px;
     preferred-height: 860px;
-    background: #0f0f12;
+    background: #0e0f14;
 
     in-out property <string> current_page: "home";
     in-out property <string> search_query: "";
     in-out property <string> current_video_id: "";
     in-out property <string> current_video_title: "";
     in-out property <bool> is_playing: false;
+    in-out property <bool> is_loading: false;
     in-out property <float> playback_position: 0.0;
     in-out property <float> playback_duration: 100.0;
     in-out property <string> time_display: "0:00 / 0:00";
     in-out property <int> volume_val: 80;
     in-out property <string> user_display_name: "Sign In";
     in-out property <bool> is_logged_in: false;
-    in-out property <string> ytdlp_version: "yt-dlp latest";
-    in-out property <string> notification_text: "";
+    in-out property <string> status_message: "";
     in-out property <[VideoCardData]> video_list: [];
     in-out property <[ChannelCardData]> channel_list: [];
     in-out property <[PlaylistCardData]> playlist_list: [];
@@ -130,22 +130,22 @@ export component AppWindow inherits Window {
     callback toggle_watch_later(string);
     callback login_google();
     callback logout_google();
-    callback check_ytdlp_update();
     callback clear_history();
+    callback clear_cache();
 
     HorizontalLayout {
-        // Sidebar Navigation
+        // Navigation Sidebar
         Rectangle {
-            width: 210px;
-            background: #141419;
-            border-color: #20212a;
+            width: 220px;
+            background: #121319;
+            border-color: #1e2029;
             border-width: 1px;
 
             VerticalLayout {
                 padding: 16px;
-                spacing: 10px;
+                spacing: 8px;
 
-                // Logo Brand
+                // Application Brand
                 HorizontalLayout {
                     spacing: 8px;
                     Rectangle {
@@ -170,58 +170,55 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle { height: 12px; }
+                Rectangle { height: 16px; }
 
-                // Navigation Buttons
+                // Navigation Items
                 Button {
-                    text: "🏠  Home";
+                    text: "Home";
                     clicked => { root.navigate("home"); }
                 }
                 Button {
-                    text: "📺  Subscriptions";
+                    text: "Subscriptions";
                     clicked => { root.navigate("subscriptions"); }
                 }
                 Button {
-                    text: "📑  Playlists";
+                    text: "Playlists";
                     clicked => { root.navigate("playlists"); }
                 }
                 Button {
-                    text: "⏱️  Watch Later";
+                    text: "Watch Later";
                     clicked => { root.navigate("watch_later"); }
                 }
                 Button {
-                    text: "📜  History";
+                    text: "History";
                     clicked => { root.navigate("history"); }
                 }
 
                 Rectangle { vertical-stretch: 1; }
 
-                // Settings & Account
                 Button {
-                    text: "⚙️  Settings";
+                    text: "Settings";
                     clicked => { root.navigate("settings"); }
                 }
             }
         }
 
-        // Main Content Area
+        // Main Workspace
         VerticalLayout {
-            // Top Header Bar
+            // Search Header
             Rectangle {
-                height: 58px;
-                background: #121317;
-                border-color: #20212a;
+                height: 56px;
+                background: #101116;
+                border-color: #1e2029;
                 border-width: 1px;
 
                 HorizontalLayout {
-                    padding: 10px;
                     padding-left: 20px;
                     padding-right: 20px;
-                    spacing: 16px;
+                    spacing: 14px;
 
-                    // Search input
                     search_input := LineEdit {
-                        placeholder-text: "Search YouTube videos (Press Enter)...";
+                        placeholder-text: "Search YouTube (Press Enter)...";
                         horizontal-stretch: 1;
                         accepted => {
                             root.search_submitted(self.text);
@@ -229,20 +226,19 @@ export component AppWindow inherits Window {
                     }
 
                     Button {
-                        text: "🔍 Search";
+                        text: "Search";
                         clicked => {
                             root.search_submitted(search_input.text);
                         }
                     }
 
-                    Rectangle { width: 10px; }
+                    Rectangle { width: 8px; }
 
-                    // Auth badge button
                     Button {
-                        text: root.is_logged_in ? "👤 " + root.user_display_name : "🔑 Sign In";
+                        text: root.is_logged_in ? root.user_display_name : "Sign In";
                         clicked => {
                             if (root.is_logged_in) {
-                                root.logout_google();
+                                root.navigate("settings");
                             } else {
                                 root.login_google();
                             }
@@ -251,36 +247,66 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Body Area (Grid or Player or Settings)
+            // Body Area
             Rectangle {
                 vertical-stretch: 1;
-                background: #0a0a0d;
+                background: #0a0b0e;
+
+                // Loading State
+                if root.is_loading: VerticalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    Text {
+                        text: "Loading videos from YouTube...";
+                        color: #8c90a4;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                    }
+                }
+
+                // Empty State
+                if !root.is_loading && root.current_page != "settings" && root.video_list.length == 0: VerticalLayout {
+                    alignment: center;
+                    spacing: 10px;
+                    Text {
+                        text: "No videos to display.";
+                        color: #ffffff;
+                        font-size: 16px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                    }
+                    Text {
+                        text: "Use the search bar above or check your connection.";
+                        color: #7b8094;
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                    }
+                }
 
                 // Video Grid ScrollView
-                if root.current_page != "settings": ScrollView {
+                if !root.is_loading && root.current_page != "settings" && root.video_list.length > 0: ScrollView {
                     viewport-width: parent.width;
 
                     VerticalLayout {
                         padding: 20px;
                         spacing: 16px;
 
-                        // Notification Banner if present
-                        if root.notification_text != "": Rectangle {
+                        // Status notification if active
+                        if root.status_message != "": Rectangle {
                             height: 36px;
-                            background: #1e2238;
+                            background: #1b1e2c;
                             border-radius: 6px;
-                            border-color: #3b426f;
+                            border-color: #2e344e;
                             border-width: 1px;
                             Text {
-                                text: root.notification_text;
+                                text: root.status_message;
                                 color: #8ab4f8;
-                                font-size: 13px;
+                                font-size: 12px;
                                 horizontal-alignment: center;
                                 vertical-alignment: center;
                             }
                         }
 
-                        // Video Grid
                         GridLayout {
                             spacing: 16px;
                             for video[i] in root.video_list: VideoCard {
@@ -300,13 +326,13 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                // Settings Page
+                // Settings View
                 if root.current_page == "settings": VerticalLayout {
-                    padding: 30px;
-                    spacing: 16px;
+                    padding: 32px;
+                    spacing: 20px;
 
                     Text {
-                        text: "RustTube Settings";
+                        text: "Settings";
                         color: #ffffff;
                         font-size: 22px;
                         font-weight: 700;
@@ -314,11 +340,11 @@ export component AppWindow inherits Window {
 
                     Rectangle {
                         height: 1px;
-                        background: #242531;
+                        background: #20222d;
                     }
 
                     Text {
-                        text: "Google Account & YouTube API";
+                        text: "Account";
                         color: #ffffff;
                         font-size: 15px;
                         font-weight: 600;
@@ -327,7 +353,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 12px;
                         Button {
-                            text: root.is_logged_in ? "Disconnect Account" : "Connect Google Account (OAuth2 PKCE)";
+                            text: root.is_logged_in ? "Sign Out" : "Sign In with Google";
                             clicked => {
                                 if (root.is_logged_in) {
                                     root.logout_google();
@@ -337,40 +363,16 @@ export component AppWindow inherits Window {
                             }
                         }
                         Text {
-                            text: root.is_logged_in ? "Connected: " + root.user_display_name : "Not connected (Using public mode)";
-                            color: #a0a0b2;
+                            text: root.is_logged_in ? "Signed in as " + root.user_display_name : "Not signed in";
+                            color: #a0a4b8;
                             vertical-alignment: center;
                         }
                     }
 
-                    Rectangle { height: 10px; }
+                    Rectangle { height: 8px; }
 
                     Text {
-                        text: "yt-dlp Extraction Engine";
-                        color: #ffffff;
-                        font-size: 15px;
-                        font-weight: 600;
-                    }
-
-                    HorizontalLayout {
-                        spacing: 12px;
-                        Text {
-                            text: root.ytdlp_version;
-                            color: #a0a0b2;
-                            vertical-alignment: center;
-                        }
-                        Button {
-                            text: "Check & Update yt-dlp";
-                            clicked => {
-                                root.check_ytdlp_update();
-                            }
-                        }
-                    }
-
-                    Rectangle { height: 10px; }
-
-                    Text {
-                        text: "Local Cache & History";
+                        text: "Local Data";
                         color: #ffffff;
                         font-size: 15px;
                         font-weight: 600;
@@ -380,19 +382,21 @@ export component AppWindow inherits Window {
                         spacing: 12px;
                         Button {
                             text: "Clear Watch History";
-                            clicked => {
-                                root.clear_history();
-                            }
+                            clicked => { root.clear_history(); }
+                        }
+                        Button {
+                            text: "Clear Thumbnail Cache";
+                            clicked => { root.clear_cache(); }
                         }
                     }
                 }
             }
 
-            // Embedded Video Player Bottom Bar / HUD
+            // Bottom Player Bar
             if root.current_video_id != "": Rectangle {
-                height: 72px;
-                background: #14151b;
-                border-color: #242531;
+                height: 70px;
+                background: #111218;
+                border-color: #1e2029;
                 border-width: 1px;
 
                 VerticalLayout {
@@ -401,7 +405,7 @@ export component AppWindow inherits Window {
                     padding-right: 16px;
                     spacing: 4px;
 
-                    // Progress timeline slider
+                    // Timeline Slider
                     HorizontalLayout {
                         spacing: 10px;
                         Slider {
@@ -414,28 +418,28 @@ export component AppWindow inherits Window {
                         }
                         Text {
                             text: root.time_display;
-                            color: #a0a0b2;
+                            color: #8c90a4;
                             font-size: 11px;
                             vertical-alignment: center;
                         }
                     }
 
-                    // Playback Controls
+                    // Player Controls
                     HorizontalLayout {
                         spacing: 12px;
 
                         Button {
-                            text: root.is_playing ? "⏸ Pause (Space)" : "▶ Play (Space)";
+                            text: root.is_playing ? "Pause" : "Play";
                             clicked => { root.toggle_play_pause(); }
                         }
 
                         Button {
-                            text: "⏪ 10s (J)";
+                            text: "-10s";
                             clicked => { root.seek_requested(root.playback_position - 10.0); }
                         }
 
                         Button {
-                            text: "⏩ 10s (L)";
+                            text: "+10s";
                             clicked => { root.seek_requested(root.playback_position + 10.0); }
                         }
 
@@ -449,21 +453,8 @@ export component AppWindow inherits Window {
                             horizontal-stretch: 1;
                         }
 
-                        // Quality selector button
                         Button {
-                            text: "1080p ⚙️";
-                            clicked => { root.quality_changed("1080p"); }
-                        }
-
-                        // Speed selector button
-                        Button {
-                            text: "1.0x ⚡";
-                            clicked => { root.speed_changed(1.0); }
-                        }
-
-                        // Fullscreen
-                        Button {
-                            text: "⛶ Fullscreen (F)";
+                            text: "Fullscreen";
                             clicked => { root.toggle_fullscreen(); }
                         }
                     }

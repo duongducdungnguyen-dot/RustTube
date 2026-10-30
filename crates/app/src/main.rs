@@ -4,21 +4,21 @@ use anyhow::Result;
 use rusttube_api::YouTubeApiClient;
 use rusttube_auth::GoogleAuthManager;
 use rusttube_cache::{HistoryStore, ThumbnailCache, WatchLaterStore};
-use rusttube_core::events::{CoreEvent, UiCommand};
-use rusttube_core::models::{AppPage, VideoItem};
-use rusttube_core::AppConfig;
+use rusttube_core::events::UiCommand;
+use rusttube_core::models::{AppPage, VideoItem, YouTubeUrlType};
+use rusttube_core::{AppConfig, YouTubeUrlParser};
 use rusttube_player::PlayerController;
 use rusttube_ytdlp::YtDlpWrapper;
-use slint::{Model, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
 use std::rc::Rc;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    info!("Starting RustTube native desktop client...");
+    info!("Starting RustTube client...");
 
     let config = AppConfig::load_or_default("config.toml");
 
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
     {
         let mut p = player.lock().await;
         if let Err(e) = p.initialize() {
-            tracing::warn!("libmpv could not be loaded at startup (will operate in audio/external mode): {}", e);
+            warn!("libmpv initialization notice: {}", e);
         }
     }
 
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     let app_window = AppWindow::new()?;
     let window_weak = app_window.as_weak();
 
-    // Hook callbacks
+    // Hook Slint UI Callbacks
     {
         let tx = cmd_tx.clone();
         app_window.on_navigate(move |page_str| {
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
 
     {
         let tx = cmd_tx.clone();
-        app_window.on_video_selected(move |id, _| {
+        app_window.on_video_selected(move |id, title| {
             let _ = tx.blocking_send(UiCommand::PlayVideo {
                 video_id: id.to_string(),
                 quality: "1080p".to_string(),
@@ -123,33 +123,26 @@ async fn main() -> Result<()> {
         });
     }
 
-    {
-        let tx = cmd_tx.clone();
-        app_window.on_check_ytdlp_update(move || {
-            let _ = tx.blocking_send(UiCommand::CheckYtDlpUpdate);
-        });
-    }
-
-    // Initial check for signed-in state
-    if let Ok(Some(_)) = auth_manager.get_access_token().await {
-        if let Ok(Some(tok)) = auth_manager.get_access_token().await {
-            if let Ok((channel_title, _)) = api_client.get_my_channel(&tok).await {
-                if let Some(win) = window_weak.upgrade() {
-                    win.set_is_logged_in(true);
-                    win.set_user_display_name(channel_title.into());
+    // Check existing sign-in status on startup
+    if let Ok(Some(token)) = auth_manager.get_access_token().await {
+        if let Ok((channel_title, _, _)) = api_client.get_my_channel(&token).await {
+            let win = window_weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = win.upgrade() {
+                    w.set_is_logged_in(true);
+                    w.set_user_display_name(channel_title.into());
                 }
-            }
+            });
         }
     }
 
-    // Initial load: trending/home videos
-    let initial_ytdlp = ytdlp.clone();
+    // Initial load: Home feed
     let initial_tx = cmd_tx.clone();
     tokio::spawn(async move {
         let _ = initial_tx.send(UiCommand::Navigate(AppPage::Home)).await;
     });
 
-    // Background Service Loop
+    // Background Service Loop (All UI updates dispatched via invoke_from_event_loop)
     let worker_player = player.clone();
     let worker_ytdlp = ytdlp.clone();
     let worker_auth = auth_manager.clone();
@@ -171,72 +164,145 @@ async fn main() -> Result<()> {
                         _ => "home",
                     };
 
-                    if let Some(w) = worker_window.upgrade() {
-                        w.set_current_page(page_name.into());
-                    }
+                    let win = worker_window.clone();
+                    let page_clone = page_name.to_string();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.set_current_page(page_clone.into());
+                            w.set_is_loading(true);
+                        }
+                    });
 
                     match page {
                         AppPage::Home => {
-                            if let Ok(results) = worker_ytdlp.search_videos("trending videos", 18).await {
-                                update_video_list(&worker_window, results);
-                            }
+                            let feed = worker_ytdlp.fetch_trending_feed(24).await.unwrap_or_default();
+                            update_slint_videos(&worker_window, feed);
                         }
                         AppPage::History => {
                             let items = worker_history.get_all().await;
-                            update_video_list(&worker_window, items);
+                            update_slint_videos(&worker_window, items);
                         }
                         AppPage::WatchLater => {
                             let items = worker_watch_later.get_all().await;
-                            update_video_list(&worker_window, items);
+                            update_slint_videos(&worker_window, items);
                         }
                         AppPage::Subscriptions => {
                             if let Ok(Some(token)) = worker_auth.get_access_token().await {
-                                if let Ok(subs) = worker_api.get_subscriptions(&token).await {
-                                    info!("Loaded {} subscriptions from YouTube API", subs.len());
+                                if let Ok((subs, _)) = worker_api.get_subscriptions(&token, None).await {
+                                    info!("Loaded {} subscriptions", subs.len());
                                 }
                             }
+                            let win = worker_window.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_is_loading(false);
+                                }
+                            });
                         }
                         AppPage::Playlists => {
                             if let Ok(Some(token)) = worker_auth.get_access_token().await {
-                                if let Ok(pl) = worker_api.get_playlists(&token).await {
-                                    info!("Loaded {} playlists from YouTube API", pl.len());
+                                if let Ok((pl, _)) = worker_api.get_playlists(&token, None).await {
+                                    info!("Loaded {} playlists", pl.len());
                                 }
                             }
+                            let win = worker_window.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_is_loading(false);
+                                }
+                            });
+                        }
+                        AppPage::Settings => {
+                            let win = worker_window.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_is_loading(false);
+                                }
+                            });
                         }
                         _ => {}
                     }
                 }
-                UiCommand::Search(query) => {
-                    if query.trim().is_empty() {
+
+                UiCommand::Search(raw_query) => {
+                    let query = raw_query.trim().to_string();
+                    if query.is_empty() {
                         continue;
                     }
-                    if let Some(w) = worker_window.upgrade() {
-                        w.set_notification_text(format!("Searching for '{}'...", query).into());
-                    }
-                    if let Ok(results) = worker_ytdlp.search_videos(&query, 24).await {
-                        update_video_list(&worker_window, results);
-                        if let Some(w) = worker_window.upgrade() {
-                            w.set_notification_text("".into());
+
+                    // Check if query is a direct YouTube URL
+                    match YouTubeUrlParser::parse(&query) {
+                        YouTubeUrlType::Video(id) | YouTubeUrlType::Shorts(id) => {
+                            let win = worker_window.clone();
+                            let id_clone = id.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_status_message(format!("Loading video {}...", id_clone).into());
+                                }
+                            });
+                            match worker_ytdlp.get_stream_info(&id, "1080p").await {
+                                Ok(stream) => {
+                                    let p = worker_player.lock().await;
+                                    let _ = p.play_stream(&stream, &id, &id).await;
+                                    let win = worker_window.clone();
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        if let Some(w) = win.upgrade() {
+                                            w.set_current_video_id(id.into());
+                                            w.set_is_playing(true);
+                                            w.set_status_message("".into());
+                                        }
+                                    });
+                                }
+                                Err(e) => {
+                                    let win = worker_window.clone();
+                                    let err_msg = format!("Playback error: {}", e);
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        if let Some(w) = win.upgrade() {
+                                            w.set_status_message(err_msg.into());
+                                        }
+                                    });
+                                }
+                            }
                         }
-                    } else if let Some(w) = worker_window.upgrade() {
-                        w.set_notification_text("Failed to fetch search results. Check network or yt-dlp.".into());
+                        _ => {
+                            // Keyword search
+                            let win = worker_window.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_is_loading(true);
+                                    w.set_current_page("home".into());
+                                }
+                            });
+
+                            let results = worker_ytdlp.search_videos(&query, 24).await.unwrap_or_default();
+                            update_slint_videos(&worker_window, results);
+                        }
                     }
                 }
-                UiCommand::PlayVideo { video_id, quality } => {
-                    if let Some(w) = worker_window.upgrade() {
-                        w.set_current_video_id(video_id.clone().into());
-                        w.set_notification_text("Resolving stream URL...".into());
-                    }
 
-                    match worker_ytdlp.get_stream_url(&video_id, &quality).await {
-                        Ok(stream_url) => {
+                UiCommand::PlayVideo { video_id, quality } => {
+                    let win = worker_window.clone();
+                    let vid = video_id.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.set_current_video_id(vid.into());
+                            w.set_status_message("Connecting stream...".into());
+                        }
+                    });
+
+                    match worker_ytdlp.get_stream_info(&video_id, &quality).await {
+                        Ok(stream) => {
                             let p = worker_player.lock().await;
-                            let _ = p.play_stream(&stream_url, &video_id, &video_id).await;
-                            if let Some(w) = worker_window.upgrade() {
-                                w.set_is_playing(true);
-                                w.set_notification_text("".into());
-                            }
-                            // Save to local history
+                            let _ = p.play_stream(&stream, &video_id, &video_id).await;
+
+                            let win = worker_window.clone();
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_is_playing(true);
+                                    w.set_status_message("".into());
+                                }
+                            });
+
                             let _ = worker_history.record(VideoItem {
                                 id: video_id.clone(),
                                 title: format!("Video {}", video_id),
@@ -250,86 +316,98 @@ async fn main() -> Result<()> {
                             }).await;
                         }
                         Err(e) => {
-                            error!("Stream extraction failed: {}", e);
-                            if let Some(w) = worker_window.upgrade() {
-                                w.set_notification_text(format!("Playback error: {}", e).into());
-                            }
+                            let win = worker_window.clone();
+                            let err_msg = format!("Playback error: {}", e);
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(w) = win.upgrade() {
+                                    w.set_status_message(err_msg.into());
+                                }
+                            });
                         }
                     }
                 }
+
                 UiCommand::TogglePlayPause => {
                     let p = worker_player.lock().await;
                     let _ = p.handle_command(UiCommand::TogglePlayPause).await;
                 }
+
                 UiCommand::SeekAbsolute(pos) => {
                     let p = worker_player.lock().await;
                     let _ = p.handle_command(UiCommand::SeekAbsolute(pos)).await;
                 }
+
                 UiCommand::ToggleFullscreen => {
                     let p = worker_player.lock().await;
                     let _ = p.handle_command(UiCommand::ToggleFullscreen).await;
                 }
+
                 UiCommand::StartGoogleLogin => {
                     let auth = worker_auth.clone();
                     let api = worker_api.clone();
                     let win = worker_window.clone();
                     tokio::spawn(async move {
-                        if let Some(w) = win.upgrade() {
-                            w.set_notification_text("Waiting for browser authorization...".into());
-                        }
+                        let win1 = win.clone();
+                        let _ = slint::invoke_from_event_loop(move || {
+                            if let Some(w) = win1.upgrade() {
+                                w.set_status_message("Waiting for browser authorization...".into());
+                            }
+                        });
+
                         match auth.start_oauth_flow().await {
                             Ok(token) => {
-                                if let Ok((name, _)) = api.get_my_channel(&token).await {
-                                    if let Some(w) = win.upgrade() {
-                                        w.set_is_logged_in(true);
-                                        w.set_user_display_name(name.into());
-                                        w.set_notification_text("Signed in successfully!".into());
-                                    }
+                                if let Ok((title, _, _)) = api.get_my_channel(&token).await {
+                                    let win2 = win.clone();
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        if let Some(w) = win2.upgrade() {
+                                            w.set_is_logged_in(true);
+                                            w.set_user_display_name(title.into());
+                                            w.set_status_message("Signed in successfully.".into());
+                                        }
+                                    });
                                 }
                             }
                             Err(e) => {
-                                if let Some(w) = win.upgrade() {
-                                    w.set_notification_text(format!("Login failed: {}", e).into());
-                                }
+                                let win2 = win.clone();
+                                let err_msg = format!("Authentication error: {}", e);
+                                let _ = slint::invoke_from_event_loop(move || {
+                                    if let Some(w) = win2.upgrade() {
+                                        w.set_status_message(err_msg.into());
+                                    }
+                                });
                             }
                         }
                     });
                 }
+
                 UiCommand::LogoutGoogle => {
                     let _ = worker_auth.logout().await;
-                    if let Some(w) = worker_window.upgrade() {
-                        w.set_is_logged_in(false);
-                        w.set_user_display_name("Sign In".into());
-                        w.set_notification_text("Signed out and cleared credentials.".into());
-                    }
+                    let win = worker_window.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.set_is_logged_in(false);
+                            w.set_user_display_name("Sign In".into());
+                            w.set_status_message("Signed out.".into());
+                        }
+                    });
                 }
+
                 UiCommand::ClearHistory => {
                     let _ = worker_history.clear().await;
-                    if let Some(w) = worker_window.upgrade() {
-                        w.set_notification_text("Watch history cleared.".into());
-                    }
-                }
-                UiCommand::CheckYtDlpUpdate => {
-                    match worker_ytdlp.get_version().await {
-                        Ok(v) => {
-                            if let Some(w) = worker_window.upgrade() {
-                                w.set_ytdlp_version(format!("yt-dlp version: {}", v).into());
-                                w.set_notification_text("yt-dlp version verified.".into());
-                            }
+                    let win = worker_window.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(w) = win.upgrade() {
+                            w.set_status_message("Watch history cleared.".into());
                         }
-                        Err(e) => {
-                            if let Some(w) = worker_window.upgrade() {
-                                w.set_notification_text(format!("yt-dlp check error: {}", e).into());
-                            }
-                        }
-                    }
+                    });
                 }
+
                 _ => {}
             }
         }
     });
 
-    // Playback status ticker
+    // Polling Player Status Ticker
     let ticker_player = player.clone();
     let ticker_window = window_weak.clone();
     tokio::spawn(async move {
@@ -340,16 +418,20 @@ async fn main() -> Result<()> {
                 let p = ticker_player.lock().await;
                 p.poll_status().await
             };
-            if let Some(w) = ticker_window.upgrade() {
-                w.set_is_playing(status.is_playing);
-                w.set_playback_position(status.position_seconds as f32);
-                w.set_playback_duration(status.duration_seconds.max(1.0) as f32);
-                let cur_m = (status.position_seconds as u32) / 60;
-                let cur_s = (status.position_seconds as u32) % 60;
-                let dur_m = (status.duration_seconds as u32) / 60;
-                let dur_s = (status.duration_seconds as u32) % 60;
-                w.set_time_display(format!("{}:{:02} / {}:{:02}", cur_m, cur_s, dur_m, dur_s).into());
-            }
+
+            let win = ticker_window.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(w) = win.upgrade() {
+                    w.set_is_playing(status.is_playing);
+                    w.set_playback_position(status.position_seconds as f32);
+                    w.set_playback_duration(status.duration_seconds.max(1.0) as f32);
+                    let cur_m = (status.position_seconds as u32) / 60;
+                    let cur_s = (status.position_seconds as u32) % 60;
+                    let dur_m = (status.duration_seconds as u32) / 60;
+                    let dur_s = (status.duration_seconds as u32) % 60;
+                    w.set_time_display(format!("{}:{:02} / {}:{:02}", cur_m, cur_s, dur_m, dur_s).into());
+                }
+            });
         }
     });
 
@@ -357,7 +439,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn update_video_list(window: &slint::Weak<AppWindow>, items: Vec<VideoItem>) {
+fn update_slint_videos(window: &slint::Weak<AppWindow>, items: Vec<VideoItem>) {
     let cards: Vec<VideoCardData> = items
         .into_iter()
         .map(|item| VideoCardData {
@@ -370,10 +452,14 @@ fn update_video_list(window: &slint::Weak<AppWindow>, items: Vec<VideoItem>) {
         })
         .collect();
 
-    if let Some(w) = window.upgrade() {
-        let model = Rc::new(VecModel::from(cards));
-        w.set_video_list(ModelRc::from(model));
-    }
+    let win = window.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(w) = win.upgrade() {
+            let model = Rc::new(VecModel::from(cards));
+            w.set_video_list(ModelRc::from(model));
+            w.set_is_loading(false);
+        }
+    });
 }
 
 fn format_views(views: u64) -> String {

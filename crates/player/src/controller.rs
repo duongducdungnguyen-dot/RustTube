@@ -1,15 +1,16 @@
 use crate::mpv::{MpvInstance, MpvLibrary};
 use anyhow::Result;
 use rusttube_core::events::UiCommand;
-use rusttube_core::models::PlaybackStatus;
+use rusttube_core::models::{PlaybackStatus, StreamInfo};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 pub struct PlayerController {
     mpv: Option<Arc<Mutex<MpvInstance>>>,
     status: Arc<Mutex<PlaybackStatus>>,
     hwdec: String,
+    window_id: Option<isize>,
 }
 
 impl PlayerController {
@@ -18,6 +19,16 @@ impl PlayerController {
             mpv: None,
             status: Arc::new(Mutex::new(PlaybackStatus::default())),
             hwdec: hwdec.to_string(),
+            window_id: None,
+        }
+    }
+
+    pub fn set_window_id(&mut self, wid: isize) {
+        self.window_id = Some(wid);
+        if let Some(mpv) = &self.mpv {
+            if let Ok(inst) = mpv.try_lock() {
+                let _ = inst.set_option("wid", &wid.to_string());
+            }
         }
     }
 
@@ -25,6 +36,9 @@ impl PlayerController {
         let lib = MpvLibrary::load()?;
         match MpvInstance::new(lib.clone(), &self.hwdec) {
             Ok(inst) => {
+                if let Some(wid) = self.window_id {
+                    let _ = inst.set_option("wid", &wid.to_string());
+                }
                 self.mpv = Some(Arc::new(Mutex::new(inst)));
                 info!("libmpv initialized with hwdec={}", self.hwdec);
                 Ok(())
@@ -32,22 +46,33 @@ impl PlayerController {
             Err(e) => {
                 warn!("Failed hwdec={}, falling back to software decoding 'no': {}", self.hwdec, e);
                 let inst = MpvInstance::new(lib, "no")?;
+                if let Some(wid) = self.window_id {
+                    let _ = inst.set_option("wid", &wid.to_string());
+                }
                 self.mpv = Some(Arc::new(Mutex::new(inst)));
                 Ok(())
             }
         }
     }
 
-    pub async fn play_stream(&self, url: &str, video_id: &str, title: &str) -> Result<()> {
+    pub async fn play_stream(&self, stream: &StreamInfo, video_id: &str, title: &str) -> Result<()> {
         if let Some(mpv) = &self.mpv {
             let inst = mpv.lock().await;
-            inst.load_file(url)?;
+
+            inst.load_file(&stream.video_url)?;
+
+            if let Some(ref audio_url) = stream.audio_url {
+                let _ = inst.command(&["audio-add", audio_url, "auto"]);
+            }
+
             inst.play()?;
+
             let mut status = self.status.lock().await;
             status.video_id = video_id.to_string();
             status.title = title.to_string();
             status.is_playing = true;
             status.is_buffering = false;
+            status.quality = stream.resolution.clone();
         }
         Ok(())
     }
@@ -124,5 +149,8 @@ impl PlayerController {
             let inst = mpv.lock().await;
             let _ = inst.stop();
         }
+        let mut status = self.status.lock().await;
+        status.is_playing = false;
+        status.position_seconds = 0.0;
     }
 }

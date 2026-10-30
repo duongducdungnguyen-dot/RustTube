@@ -75,6 +75,24 @@ impl Default for PlaybackStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamInfo {
+    pub video_url: String,
+    pub audio_url: Option<String>,
+    pub format_id: String,
+    pub resolution: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum YouTubeUrlType {
+    Video(String),
+    Shorts(String),
+    Playlist(String),
+    Channel(String),
+    Search(String),
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AppPage {
     Home,
     Search,
@@ -90,6 +108,6 @@ pub enum AppPage {
 pub enum AuthState {
     Unauthenticated,
     Authenticating,
-    Authenticated { user_name: String, email: String },
+    Authenticated { user_name: String, email: String, avatar_url: String },
     Error(String),
 }

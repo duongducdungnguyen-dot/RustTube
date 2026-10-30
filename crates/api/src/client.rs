@@ -17,12 +17,15 @@ impl Default for YouTubeApiClient {
 impl YouTubeApiClient {
     pub fn new() -> Self {
         Self {
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default(),
             base_url: "https://www.googleapis.com/youtube/v3",
         }
     }
 
-    pub async fn get_my_channel(&self, access_token: &str) -> Result<(String, String)> {
+    pub async fn get_my_channel(&self, access_token: &str) -> Result<(String, String, String)> {
         let url = format!("{}/channels?part=snippet&mine=true", self.base_url);
         let resp = self
             .client
@@ -43,21 +46,29 @@ impl YouTubeApiClient {
 
         let title = item["snippet"]["title"]
             .as_str()
-            .unwrap_or("Personal User")
+            .unwrap_or("Personal Account")
             .to_string();
         let custom_url = item["snippet"]["customUrl"]
             .as_str()
             .unwrap_or("")
             .to_string();
+        let avatar_url = item["snippet"]["thumbnails"]["default"]["url"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
 
-        Ok((title, custom_url))
+        Ok((title, custom_url, avatar_url))
     }
 
-    pub async fn get_subscriptions(&self, access_token: &str) -> Result<Vec<ChannelItem>> {
-        let url = format!(
+    pub async fn get_subscriptions(&self, access_token: &str, page_token: Option<&str>) -> Result<(Vec<ChannelItem>, Option<String>)> {
+        let mut url = format!(
             "{}/subscriptions?part=snippet&mine=true&maxResults=50&order=alphabetical",
             self.base_url
         );
+        if let Some(token) = page_token {
+            url.push_str(&format!("&pageToken={}", token));
+        }
+
         let resp = self
             .client
             .get(&url)
@@ -70,6 +81,7 @@ impl YouTubeApiClient {
         }
 
         let json: Value = resp.json().await?;
+        let next_page_token = json["nextPageToken"].as_str().map(|s| s.to_string());
         let mut results = Vec::new();
 
         if let Some(items) = json["items"].as_array() {
@@ -99,14 +111,18 @@ impl YouTubeApiClient {
             }
         }
 
-        Ok(results)
+        Ok((results, next_page_token))
     }
 
-    pub async fn get_playlists(&self, access_token: &str) -> Result<Vec<PlaylistItem>> {
-        let url = format!(
+    pub async fn get_playlists(&self, access_token: &str, page_token: Option<&str>) -> Result<(Vec<PlaylistItem>, Option<String>)> {
+        let mut url = format!(
             "{}/playlists?part=snippet,contentDetails&mine=true&maxResults=50",
             self.base_url
         );
+        if let Some(token) = page_token {
+            url.push_str(&format!("&pageToken={}", token));
+        }
+
         let resp = self
             .client
             .get(&url)
@@ -119,6 +135,7 @@ impl YouTubeApiClient {
         }
 
         let json: Value = resp.json().await?;
+        let next_page_token = json["nextPageToken"].as_str().map(|s| s.to_string());
         let mut results = Vec::new();
 
         if let Some(items) = json["items"].as_array() {
@@ -148,7 +165,7 @@ impl YouTubeApiClient {
             }
         }
 
-        Ok(results)
+        Ok((results, next_page_token))
     }
 
     pub async fn get_playlist_items(
@@ -184,7 +201,7 @@ impl YouTubeApiClient {
                 let title = snippet["title"].as_str().unwrap_or_default().to_string();
                 let channel_name = snippet["videoOwnerChannelTitle"]
                     .as_str()
-                    .unwrap_or("Unknown")
+                    .unwrap_or("YouTube Channel")
                     .to_string();
                 let channel_id = snippet["videoOwnerChannelId"]
                     .as_str()
@@ -243,7 +260,7 @@ impl YouTubeApiClient {
                 let title = snippet["title"].as_str().unwrap_or_default().to_string();
                 let channel_name = snippet["channelTitle"]
                     .as_str()
-                    .unwrap_or("Unknown")
+                    .unwrap_or("YouTube Channel")
                     .to_string();
                 let channel_id = snippet["channelId"]
                     .as_str()
