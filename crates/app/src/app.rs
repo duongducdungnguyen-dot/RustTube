@@ -81,21 +81,45 @@ impl RustTubeApp {
         let initial_hist = history_repo.list(None, 200).unwrap_or_default();
         let last_sync = sync_repo.get_last_sync_timestamp("account").unwrap_or(None);
 
-        let worker_cfg = config.clone();
+        let mut worker_cfg = config.clone();
         rt_handle.spawn(async move {
             let api = YouTubeApiClient::new();
             let ytdlp = YtDlpRunner::new(
                 worker_cfg.ytdlp.binary_path.clone(),
                 worker_cfg.ytdlp.cookies_browser.clone(),
             );
-            let auth = OAuthSessionManager::new(
+            let mut auth = OAuthSessionManager::new(
                 worker_cfg.auth.google_client_id.clone(),
                 worker_cfg.auth.keyring_service_name.clone(),
             );
 
-            // Automatic session restoration at startup
-            if worker_cfg.auth.auto_restore_session {
-                let _ = auth.restore_or_refresh_session().await;
+            // Automatic session restoration at startup when a valid client_id is configured
+            if worker_cfg.auth.auto_restore_session
+                && !AuthConfig::is_placeholder_or_empty(&worker_cfg.auth.google_client_id)
+            {
+                match auth.restore_or_refresh_session().await {
+                    Ok(Some(tokens)) => match api
+                        .fetch_authenticated_profile(&tokens.access_token)
+                        .await
+                    {
+                        Ok(profile) => {
+                            let _ = evt_tx.send(AppEvent::AuthUpdated {
+                                profile: Some(profile.clone()),
+                            });
+                            let _ = evt_tx.send(AppEvent::Notification(format!(
+                                "Restored Google session as {}",
+                                profile.display_name
+                            )));
+                        }
+                        Err(err) => {
+                            let _ = evt_tx.send(AppEvent::Error(err));
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(err) => {
+                        let _ = evt_tx.send(AppEvent::Error(err));
+                    }
+                }
             }
 
             // Automatic startup update check against GitHub Releases
@@ -120,6 +144,98 @@ impl RustTubeApp {
 
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
+                    UiCommand::StartGoogleLogin => {
+                        handle_start_google_login(
+                            &auth,
+                            &api,
+                            worker_cfg.auth.redirect_port,
+                            &evt_tx,
+                        )
+                        .await;
+                    }
+                    UiCommand::Logout => {
+                        handle_logout(&auth, &evt_tx);
+                    }
+                    UiCommand::TriggerAccountSync => {
+                        match auth.restore_or_refresh_session().await {
+                            Ok(Some(tokens)) => {
+                                let _ = evt_tx.send(AppEvent::Notification(
+                                    "Synchronizing YouTube subscriptions and playlists...".to_string(),
+                                ));
+                                match api.fetch_all_subscriptions(&tokens.access_token).await {
+                                    Ok(channels) => {
+                                        let _ = sync_repo.replace_subscriptions(&channels);
+                                        let _ = evt_tx
+                                            .send(AppEvent::SubscriptionsLoaded { channels });
+                                    }
+                                    Err(err) => {
+                                        let _ = evt_tx.send(AppEvent::Error(err));
+                                        continue;
+                                    }
+                                }
+                                match api.fetch_all_playlists(&tokens.access_token).await {
+                                    Ok(playlists) => {
+                                        let _ = sync_repo.replace_playlists(&playlists);
+                                        let _ =
+                                            evt_tx.send(AppEvent::PlaylistsLoaded { playlists });
+                                    }
+                                    Err(err) => {
+                                        let _ = evt_tx.send(AppEvent::Error(err));
+                                        continue;
+                                    }
+                                }
+                                let now = Utc::now().timestamp();
+                                let _ = sync_repo.set_last_sync_timestamp("account", now);
+                                let subs_len = sync_repo
+                                    .get_subscriptions(None)
+                                    .map(|v| v.len())
+                                    .unwrap_or(0);
+                                let pls_len =
+                                    sync_repo.get_playlists().map(|v| v.len()).unwrap_or(0);
+                                let likes_len =
+                                    sync_repo.get_liked_videos().map(|v| v.len()).unwrap_or(0);
+                                let _ = evt_tx.send(AppEvent::SyncStateUpdated(SyncState {
+                                    is_syncing: false,
+                                    last_successful_sync: Some(now),
+                                    subscriptions_count: subs_len,
+                                    playlists_count: pls_len,
+                                    liked_videos_count: likes_len,
+                                    last_error: None,
+                                }));
+                                let _ = evt_tx.send(AppEvent::Notification(
+                                    "YouTube account synchronization complete.".to_string(),
+                                ));
+                            }
+                            Ok(None) => {
+                                let _ = evt_tx.send(AppEvent::Error(ClassifiedError {
+                                    kind: SyncErrorKind::Authentication,
+                                    message: "Not signed in. Please click 'Sign In with Google' first.".to_string(),
+                                    occurred_at: Utc::now().timestamp(),
+                                }));
+                            }
+                            Err(err) => {
+                                let _ = evt_tx.send(AppEvent::Error(err));
+                            }
+                        }
+                    }
+                    UiCommand::SaveSettings(new_cfg) => {
+                        worker_cfg = new_cfg;
+                        auth.set_client_id(worker_cfg.auth.google_client_id.clone());
+                        match worker_cfg.save() {
+                            Ok(()) => {
+                                let _ = evt_tx.send(AppEvent::Notification(
+                                    "Application settings saved.".to_string(),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = evt_tx.send(AppEvent::Error(ClassifiedError {
+                                    kind: SyncErrorKind::Database,
+                                    message: format!("Failed to save config.toml: {}", e),
+                                    occurred_at: Utc::now().timestamp(),
+                                }));
+                            }
+                        }
+                    }
                     UiCommand::Search { query } => {
                         if let Ok(videos) = ytdlp.search(&query, 24).await {
                             let _ = evt_tx.send(AppEvent::SearchResultsLoaded { query, videos });
@@ -273,6 +389,61 @@ impl RustTubeApp {
     }
 }
 
+pub async fn handle_start_google_login(
+    auth: &OAuthSessionManager,
+    api: &YouTubeApiClient,
+    redirect_port: u16,
+    evt_tx: &UnboundedSender<AppEvent>,
+) {
+    if let Err(err) = auth.validate_configured_client_id() {
+        let _ = evt_tx.send(AppEvent::Error(err));
+        return;
+    }
+
+    let _ = evt_tx.send(AppEvent::Notification(
+        "Opening system browser for Google Sign-In...".to_string(),
+    ));
+
+    match auth.start_pkce_login(redirect_port).await {
+        Ok(tokens) => match api.fetch_authenticated_profile(&tokens.access_token).await {
+            Ok(profile) => {
+                let display_name = profile.display_name.clone();
+                let _ = evt_tx.send(AppEvent::AuthUpdated {
+                    profile: Some(profile),
+                });
+                let _ = evt_tx.send(AppEvent::Notification(format!(
+                    "Signed in with Google as {}",
+                    display_name
+                )));
+            }
+            Err(err) => {
+                let _ = evt_tx.send(AppEvent::Error(err));
+            }
+        },
+        Err(err) => {
+            let _ = evt_tx.send(AppEvent::Error(err));
+        }
+    }
+}
+
+pub fn handle_logout(auth: &OAuthSessionManager, evt_tx: &UnboundedSender<AppEvent>) {
+    match auth.logout() {
+        Ok(()) => {
+            let _ = evt_tx.send(AppEvent::AuthUpdated { profile: None });
+            let _ = evt_tx.send(AppEvent::Notification(
+                "Signed out of Google account and cleared stored credentials.".to_string(),
+            ));
+        }
+        Err(e) => {
+            let _ = evt_tx.send(AppEvent::Error(ClassifiedError {
+                kind: SyncErrorKind::Authentication,
+                message: format!("Failed to clear credentials on logout: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            }));
+        }
+    }
+}
+
 impl eframe::App for RustTubeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         while let Ok(evt) = self.evt_rx.try_recv() {
@@ -336,6 +507,7 @@ impl eframe::App for RustTubeApp {
                 }
                 AppEvent::AuthUpdated { profile } => {
                     self.profile = profile;
+                    self.sync_state.last_error = None;
                 }
                 AppEvent::SyncStateUpdated(state) => {
                     self.sync_state = state;
@@ -347,6 +519,7 @@ impl eframe::App for RustTubeApp {
                     self.notification = Some(msg);
                 }
                 AppEvent::Error(err) => {
+                    self.notification = Some(format!("Error ({:?}): {}", err.kind, err.message));
                     self.sync_state.last_error = Some(err);
                     self.is_loading = false;
                 }
@@ -544,6 +717,54 @@ impl eframe::App for RustTubeApp {
             }
         } else if self.current_page != prev_page {
             self.nav_history.push(prev_page);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_start_google_login_dispatch_emits_error_when_client_id_is_placeholder() {
+        let (evt_tx, mut evt_rx) = unbounded_channel::<AppEvent>();
+        let auth = OAuthSessionManager::new(
+            EXAMPLE_GOOGLE_CLIENT_ID_PLACEHOLDER.to_string(),
+            "RustTube_Test_Keyring".to_string(),
+        );
+        let api = YouTubeApiClient::new();
+
+        handle_start_google_login(&auth, &api, 8989, &evt_tx).await;
+
+        let evt = evt_rx
+            .try_recv()
+            .expect("StartGoogleLogin must emit an event instead of being silently ignored");
+        match evt {
+            AppEvent::Error(err) => {
+                assert_eq!(err.kind, SyncErrorKind::Authentication);
+                assert!(err.message.contains("google_client_id"));
+            }
+            other => panic!("Expected AppEvent::Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_logout_dispatch_emits_auth_updated_or_error() {
+        let (evt_tx, mut evt_rx) = unbounded_channel::<AppEvent>();
+        let auth = OAuthSessionManager::new(
+            "1234567890-test.apps.googleusercontent.com".to_string(),
+            "RustTube_Test_Keyring_Logout".to_string(),
+        );
+
+        handle_logout(&auth, &evt_tx);
+
+        let evt = evt_rx
+            .try_recv()
+            .expect("Logout must emit an event to update the UI");
+        match evt {
+            AppEvent::AuthUpdated { profile } => assert!(profile.is_none()),
+            AppEvent::Error(err) => assert_eq!(err.kind, SyncErrorKind::Authentication),
+            other => panic!("Unexpected event from logout: {:?}", other),
         }
     }
 }

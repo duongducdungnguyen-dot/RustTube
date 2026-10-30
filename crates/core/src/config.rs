@@ -1,8 +1,13 @@
+use crate::models::{ClassifiedError, SyncErrorKind};
 use anyhow::{Context, Result};
+use chrono::Utc;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+
+pub const EXAMPLE_GOOGLE_CLIENT_ID_PLACEHOLDER: &str =
+    "YOUR_GOOGLE_OAUTH_DESKTOP_CLIENT_ID.apps.googleusercontent.com";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -20,6 +25,48 @@ pub struct AuthConfig {
     pub redirect_port: u16,
     pub keyring_service_name: String,
     pub auto_restore_session: bool,
+}
+
+impl AuthConfig {
+    pub fn is_placeholder_or_empty(client_id: &str) -> bool {
+        let trimmed = client_id.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+        let upper = trimmed.to_ascii_uppercase();
+        trimmed.eq_ignore_ascii_case(EXAMPLE_GOOGLE_CLIENT_ID_PLACEHOLDER)
+            || upper.starts_with("YOUR_GOOGLE_OAUTH")
+            || upper.starts_with("YOUR_CLIENT_ID")
+            || upper.contains("YOUR_GOOGLE_OAUTH_DESKTOP_CLIENT_ID")
+    }
+
+    pub fn validate_client_id(&self) -> std::result::Result<String, ClassifiedError> {
+        Self::validate_client_id_str(&self.google_client_id)
+    }
+
+    pub fn validate_client_id_str(client_id: &str) -> std::result::Result<String, ClassifiedError> {
+        let trimmed = client_id.trim();
+        if Self::is_placeholder_or_empty(trimmed) {
+            return Err(ClassifiedError {
+                kind: SyncErrorKind::Authentication,
+                message: format!(
+                    "Google OAuth Client ID is not configured or still set to the example placeholder. Set a valid Desktop App `google_client_id` in `{}` or `./config.toml`.",
+                    AppConfig::config_file_path().display()
+                ),
+                occurred_at: Utc::now().timestamp(),
+            });
+        }
+        Ok(trimmed.to_string())
+    }
+
+    pub fn loopback_redirect_uri(&self) -> String {
+        let port = if self.redirect_port == 0 {
+            8989
+        } else {
+            self.redirect_port
+        };
+        format!("http://127.0.0.1:{}/callback", port)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,14 +185,30 @@ impl AppConfig {
 
     pub fn load() -> Result<Self> {
         let primary = Self::config_file_path();
+        let local_fallback = PathBuf::from("config.toml");
+
         if primary.exists() {
             let raw = fs::read_to_string(&primary)
                 .with_context(|| format!("Failed to read {}", primary.display()))?;
-            let cfg: AppConfig = toml::from_str(&raw).unwrap_or_default();
+            let mut cfg: AppConfig = toml::from_str(&raw).unwrap_or_default();
+
+            // If primary config has an empty/placeholder client_id, check if `./config.toml` has a configured client_id
+            if AuthConfig::is_placeholder_or_empty(&cfg.auth.google_client_id)
+                && local_fallback.exists()
+                && local_fallback != primary
+            {
+                if let Ok(local_raw) = fs::read_to_string(&local_fallback) {
+                    if let Ok(local_cfg) = toml::from_str::<AppConfig>(&local_raw) {
+                        if !AuthConfig::is_placeholder_or_empty(&local_cfg.auth.google_client_id) {
+                            cfg.auth = local_cfg.auth;
+                            let _ = cfg.save();
+                        }
+                    }
+                }
+            }
             return Ok(cfg);
         }
 
-        let local_fallback = PathBuf::from("config.toml");
         if local_fallback.exists() {
             let raw = fs::read_to_string(&local_fallback)?;
             let cfg: AppConfig = toml::from_str(&raw).unwrap_or_default();
@@ -166,5 +229,29 @@ impl AppConfig {
         let serialized = toml::to_string_pretty(self)?;
         fs::write(&path, serialized)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_client_id_rejects_empty_and_placeholder() {
+        assert!(AuthConfig::validate_client_id_str("").is_err());
+        assert!(AuthConfig::validate_client_id_str("   ").is_err());
+        assert!(
+            AuthConfig::validate_client_id_str(EXAMPLE_GOOGLE_CLIENT_ID_PLACEHOLDER).is_err()
+        );
+        assert!(
+            AuthConfig::validate_client_id_str("your_google_oauth_desktop_client_id.apps.googleusercontent.com")
+                .is_err()
+        );
+
+        let valid = AuthConfig::validate_client_id_str(
+            "  1234567890-abcdefg.apps.googleusercontent.com  ",
+        )
+        .expect("valid desktop client id");
+        assert_eq!(valid, "1234567890-abcdefg.apps.googleusercontent.com");
     }
 }

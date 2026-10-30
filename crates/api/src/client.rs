@@ -2,7 +2,7 @@ use chrono::Utc;
 use reqwest::{Client, StatusCode};
 use rusttube_core::{
     ChannelItem, ClassifiedError, PlaylistItem, PlaylistPrivacy, PlaylistVideoItem, SyncErrorKind,
-    VideoAvailability, VideoItem, VideoRating,
+    UserProfile, VideoAvailability, VideoItem, VideoRating,
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -69,6 +69,94 @@ impl YouTubeApiClient {
             kind: SyncErrorKind::Network,
             message: format!("YouTube API returned HTTP {}", status.as_u16()),
             occurred_at: now,
+        }
+    }
+
+    /// Fetches the authenticated user's YouTube channel profile (`channels.list?part=snippet&mine=true`).
+    pub async fn fetch_authenticated_profile(
+        &self,
+        access_token: &str,
+    ) -> Result<UserProfile, ClassifiedError> {
+        let resp = self
+            .http
+            .get(format!("{}/channels", YT_API_BASE))
+            .bearer_auth(access_token)
+            .query(&[("part", "snippet"), ("mine", "true")])
+            .send()
+            .await
+            .map_err(|e| ClassifiedError {
+                kind: SyncErrorKind::Network,
+                message: format!("Failed to fetch authenticated YouTube profile: {}", e),
+                occurred_at: Utc::now().timestamp(),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(Self::classify_http_error(status, &text));
+        }
+
+        let payload: Value = resp.json().await.map_err(|e| ClassifiedError {
+            kind: SyncErrorKind::Parsing,
+            message: format!("Failed to parse authenticated profile JSON: {}", e),
+            occurred_at: Utc::now().timestamp(),
+        })?;
+
+        Ok(Self::parse_authenticated_channel_profile(&payload))
+    }
+
+    pub fn parse_authenticated_channel_profile(payload: &Value) -> UserProfile {
+        if let Some(first) = payload
+            .get("items")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+        {
+            let channel_id = first
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let snippet = first.get("snippet").unwrap_or(&Value::Null);
+            let display_name = snippet
+                .get("title")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or("YouTube Account")
+                .to_string();
+            let handle = snippet
+                .get("customUrl")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    if channel_id.is_empty() {
+                        "YouTube OAuth".to_string()
+                    } else {
+                        channel_id.clone()
+                    }
+                });
+            let avatar_url = snippet
+                .pointer("/thumbnails/high/url")
+                .or_else(|| snippet.pointer("/thumbnails/default/url"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+
+            return UserProfile {
+                channel_id,
+                display_name,
+                email: handle.clone(),
+                handle,
+                avatar_url,
+            };
+        }
+
+        UserProfile {
+            channel_id: String::new(),
+            display_name: "Google YouTube Account".to_string(),
+            email: "YouTube OAuth".to_string(),
+            handle: "@youtube".to_string(),
+            avatar_url: String::new(),
         }
     }
 
@@ -809,5 +897,30 @@ mod tests {
         assert_eq!(parsed[0].availability_status, VideoAvailability::Private);
         assert_eq!(parsed[1].availability_status, VideoAvailability::Deleted);
         assert_eq!(parsed[2].availability_status, VideoAvailability::Available);
+    }
+
+    #[test]
+    fn test_parse_authenticated_channel_profile() {
+        let raw = json!({
+            "items": [
+                {
+                    "id": "UC_RUSTTUBE_USER",
+                    "snippet": {
+                        "title": "RustTube Developer",
+                        "customUrl": "@rusttubedev",
+                        "thumbnails": {
+                            "high": { "url": "https://yt3.ggpht.com/avatar.jpg" }
+                        }
+                    }
+                }
+            ]
+        });
+
+        let profile = YouTubeApiClient::parse_authenticated_channel_profile(&raw);
+        assert_eq!(profile.channel_id, "UC_RUSTTUBE_USER");
+        assert_eq!(profile.display_name, "RustTube Developer");
+        assert_eq!(profile.handle, "@rusttubedev");
+        assert_eq!(profile.email, "@rusttubedev");
+        assert_eq!(profile.avatar_url, "https://yt3.ggpht.com/avatar.jpg");
     }
 }
