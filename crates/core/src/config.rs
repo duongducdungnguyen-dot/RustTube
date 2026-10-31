@@ -3,11 +3,14 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 
 pub const EXAMPLE_GOOGLE_CLIENT_ID_PLACEHOLDER: &str =
     "YOUR_GOOGLE_OAUTH_DESKTOP_CLIENT_ID.apps.googleusercontent.com";
+pub const EXAMPLE_GOOGLE_CLIENT_SECRET_PLACEHOLDER: &str =
+    "YOUR_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -19,12 +22,31 @@ pub struct AppConfig {
     pub updater: UpdaterConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub google_client_id: String,
+    #[serde(default)]
+    pub google_client_secret: String,
     pub redirect_port: u16,
     pub keyring_service_name: String,
     pub auto_restore_session: bool,
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let secret_display = if self.google_client_secret.trim().is_empty() {
+            ""
+        } else {
+            "[REDACTED]"
+        };
+        f.debug_struct("AuthConfig")
+            .field("google_client_id", &self.google_client_id)
+            .field("google_client_secret", &secret_display)
+            .field("redirect_port", &self.redirect_port)
+            .field("keyring_service_name", &self.keyring_service_name)
+            .field("auto_restore_session", &self.auto_restore_session)
+            .finish()
+    }
 }
 
 impl AuthConfig {
@@ -38,6 +60,31 @@ impl AuthConfig {
             || upper.starts_with("YOUR_GOOGLE_OAUTH")
             || upper.starts_with("YOUR_CLIENT_ID")
             || upper.contains("YOUR_GOOGLE_OAUTH_DESKTOP_CLIENT_ID")
+    }
+
+    pub fn is_placeholder_or_empty_secret(client_secret: &str) -> bool {
+        let trimmed = client_secret.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+        let upper = trimmed.to_ascii_uppercase();
+        trimmed.eq_ignore_ascii_case(EXAMPLE_GOOGLE_CLIENT_SECRET_PLACEHOLDER)
+            || upper.starts_with("YOUR_GOOGLE_OAUTH")
+            || upper.starts_with("YOUR_CLIENT_SECRET")
+            || upper.contains("YOUR_GOOGLE_OAUTH_DESKTOP_CLIENT_SECRET")
+    }
+
+    pub fn normalize_client_secret_str(client_secret: &str) -> Option<String> {
+        let trimmed = client_secret.trim();
+        if Self::is_placeholder_or_empty_secret(trimmed) {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+
+    pub fn normalized_client_secret(&self) -> Option<String> {
+        Self::normalize_client_secret_str(&self.google_client_secret)
     }
 
     pub fn validate_client_id(&self) -> std::result::Result<String, ClassifiedError> {
@@ -111,6 +158,7 @@ impl Default for AppConfig {
         Self {
             auth: AuthConfig {
                 google_client_id: String::new(),
+                google_client_secret: String::new(),
                 redirect_port: 8989,
                 keyring_service_name: "RustTube_Google_OAuth".to_string(),
                 auto_restore_session: true,
@@ -151,7 +199,8 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    /// Returns the persistent user configuration file path in %APPDATA%\RustTube\config.toml
+    /// Returns the persistent user configuration file path in
+    /// `%APPDATA%\RustTube\RustTube\config\config.toml` (via `ProjectDirs::from("com", "RustTube", "RustTube")`),
     /// separated from the binary installation directory so application updates never touch it.
     pub fn config_file_path() -> PathBuf {
         if let Some(proj) = ProjectDirs::from("com", "RustTube", "RustTube") {
@@ -162,7 +211,7 @@ impl AppConfig {
         PathBuf::from("config.toml")
     }
 
-    /// Returns the persistent user data directory in %LOCALAPPDATA%\RustTube\data
+    /// Returns the persistent user data directory in `%LOCALAPPDATA%\RustTube\RustTube\data\data`
     pub fn user_data_dir(&self) -> PathBuf {
         if !self.storage.custom_data_dir.trim().is_empty() {
             let custom = PathBuf::from(&self.storage.custom_data_dir);
@@ -192,15 +241,26 @@ impl AppConfig {
                 .with_context(|| format!("Failed to read {}", primary.display()))?;
             let mut cfg: AppConfig = toml::from_str(&raw).unwrap_or_default();
 
-            // If primary config has an empty/placeholder client_id, check if `./config.toml` has a configured client_id
-            if AuthConfig::is_placeholder_or_empty(&cfg.auth.google_client_id)
-                && local_fallback.exists()
-                && local_fallback != primary
-            {
+            // Merge missing OAuth fields from `./config.toml` if primary config is missing them
+            if local_fallback.exists() && local_fallback != primary {
                 if let Ok(local_raw) = fs::read_to_string(&local_fallback) {
                     if let Ok(local_cfg) = toml::from_str::<AppConfig>(&local_raw) {
-                        if !AuthConfig::is_placeholder_or_empty(&local_cfg.auth.google_client_id) {
-                            cfg.auth = local_cfg.auth;
+                        let mut updated = false;
+                        if AuthConfig::is_placeholder_or_empty(&cfg.auth.google_client_id)
+                            && !AuthConfig::is_placeholder_or_empty(
+                                &local_cfg.auth.google_client_id,
+                            )
+                        {
+                            cfg.auth.google_client_id = local_cfg.auth.google_client_id;
+                            updated = true;
+                        }
+                        if cfg.auth.normalized_client_secret().is_none()
+                            && local_cfg.auth.normalized_client_secret().is_some()
+                        {
+                            cfg.auth.google_client_secret = local_cfg.auth.google_client_secret;
+                            updated = true;
+                        }
+                        if updated {
                             let _ = cfg.save();
                         }
                     }
@@ -244,8 +304,10 @@ mod tests {
             AuthConfig::validate_client_id_str(EXAMPLE_GOOGLE_CLIENT_ID_PLACEHOLDER).is_err()
         );
         assert!(
-            AuthConfig::validate_client_id_str("your_google_oauth_desktop_client_id.apps.googleusercontent.com")
-                .is_err()
+            AuthConfig::validate_client_id_str(
+                "your_google_oauth_desktop_client_id.apps.googleusercontent.com"
+            )
+            .is_err()
         );
 
         let valid = AuthConfig::validate_client_id_str(
@@ -253,5 +315,59 @@ mod tests {
         )
         .expect("valid desktop client id");
         assert_eq!(valid, "1234567890-abcdefg.apps.googleusercontent.com");
+    }
+
+    #[test]
+    fn test_legacy_config_without_client_secret_deserializes_and_redacts_debug() {
+        let legacy_toml = r#"
+[auth]
+google_client_id = "1234567890-legacy.apps.googleusercontent.com"
+redirect_port = 8989
+keyring_service_name = "RustTube_Google_OAuth"
+auto_restore_session = true
+
+[sync]
+auto_sync_enabled = true
+sync_interval_minutes = 30
+max_uploads_per_channel = 8
+
+[playback]
+hwdec = "auto-safe"
+default_quality = "1080p"
+default_volume = 80
+default_speed = 1.0
+resume_playback = true
+
+[ytdlp]
+binary_path = "bin/yt-dlp.exe"
+cookies_browser = "none"
+experimental_cookie_home_feed = false
+experimental_cookie_watch_later = false
+
+[storage]
+custom_data_dir = ""
+thumbnail_cache_mb = 256
+
+[updater]
+auto_check_updates = true
+include_prereleases = false
+github_repo = "duongducdungnguyen-dot/RustTube"
+"#;
+
+        let parsed: AppConfig =
+            toml::from_str(legacy_toml).expect("legacy config without google_client_secret must parse");
+        assert_eq!(parsed.auth.google_client_secret, "");
+        assert!(parsed.auth.normalized_client_secret().is_none());
+
+        let mut with_secret = parsed.auth.clone();
+        with_secret.google_client_secret = "  test_only_placeholder_value_999  ".to_string();
+        assert_eq!(
+            with_secret.normalized_client_secret().as_deref(),
+            Some("test_only_placeholder_value_999")
+        );
+
+        let debug_str = format!("{:?}", with_secret);
+        assert!(!debug_str.contains("test_only_placeholder_value_999"));
+        assert!(debug_str.contains("[REDACTED]"));
     }
 }

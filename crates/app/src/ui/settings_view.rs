@@ -17,6 +17,25 @@ pub fn render_settings_view(
     // 1. Account & Synchronization
     ui.group(|ui| {
         ui.heading("Google Account & Synchronization");
+        ui.horizontal(|ui| {
+            ui.label("OAuth Client ID:");
+            ui.add(
+                egui::TextEdit::singleline(&mut config.auth.google_client_id)
+                    .hint_text("1234567890-...apps.googleusercontent.com")
+                    .desired_width(420.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("OAuth Client Secret:");
+            ui.add(
+                egui::TextEdit::singleline(&mut config.auth.google_client_secret)
+                    .password(true)
+                    .hint_text("Optional Desktop client secret (stored locally in %APPDATA%)")
+                    .desired_width(420.0),
+            );
+        });
+        ui.add_space(4.0);
+
         if let Some(user) = profile {
             ui.label(format!("Connected as: {} ({})", user.display_name, user.email));
             if ui.button("Sign Out").clicked() {
@@ -33,6 +52,7 @@ pub fn render_settings_view(
         } else {
             ui.label("Not signed in. Sign in with Google OAuth2 PKCE to sync subscriptions, playlists, and likes.");
             if ui.button("Sign In with Google").clicked() {
+                let _ = cmd_tx.send(UiCommand::SaveSettings(config.clone()));
                 let _ = cmd_tx.send(UiCommand::StartGoogleLogin);
             }
         }

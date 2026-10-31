@@ -182,21 +182,48 @@ pub fn parse_and_validate_callback_request(
     Ok(auth_code)
 }
 
-/// Builds the URL-encoded form body for the installed-app PKCE authorization code exchange.
-/// Does not embed or require a client_secret.
+/// Builds the URL-encoded form body for the installed-app OAuth2 + PKCE authorization code exchange.
+/// Always sends `code_verifier` (PKCE) and includes `client_secret` when configured and non-empty.
 pub fn build_token_exchange_form(
     client_id: &str,
+    client_secret: Option<&str>,
     code: &str,
     redirect_uri: &str,
     code_verifier: &str,
 ) -> String {
-    url::form_urlencoded::Serializer::new(String::new())
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer
         .append_pair("client_id", client_id)
         .append_pair("code", code)
         .append_pair("redirect_uri", redirect_uri)
         .append_pair("code_verifier", code_verifier)
-        .append_pair("grant_type", "authorization_code")
-        .finish()
+        .append_pair("grant_type", "authorization_code");
+
+    if let Some(secret) = client_secret.and_then(AuthConfig::normalize_client_secret_str) {
+        serializer.append_pair("client_secret", &secret);
+    }
+
+    serializer.finish()
+}
+
+/// Builds the URL-encoded form body for refreshing an OAuth2 access token.
+/// Includes `client_secret` when configured and non-empty.
+pub fn build_refresh_token_form(
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer
+        .append_pair("client_id", client_id)
+        .append_pair("refresh_token", refresh_token)
+        .append_pair("grant_type", "refresh_token");
+
+    if let Some(secret) = client_secret.and_then(AuthConfig::normalize_client_secret_str) {
+        serializer.append_pair("client_secret", &secret);
+    }
+
+    serializer.finish()
 }
 
 /// Merges a token endpoint response with any previously stored token set so that
@@ -244,18 +271,19 @@ pub(crate) fn merge_token_response(
 }
 
 /// Maps HTTP error responses from `https://oauth2.googleapis.com/token` into a `ClassifiedError`
-/// that preserves the safe provider error detail (`error` and `error_description`) without
-/// exposing tokens or secrets, and provides actionable remediation when a Web application
-/// credential (`client_secret is missing.`) is used instead of a Desktop app credential.
+/// that preserves the safe provider error detail (`error` and `error_description`), never exposes
+/// any configured secret or token, and accurately explains when the token endpoint requires
+/// `client_secret` or when `client_id` / `client_secret` do not match the same Desktop OAuth client.
 pub fn map_token_exchange_error(
     status: u16,
     err_text: &str,
     redirect_uri: &str,
+    configured_secret: Option<&str>,
 ) -> ClassifiedError {
     let now = Utc::now().timestamp();
     let parsed = serde_json::from_str::<GoogleOAuthErrorPayload>(err_text).ok();
 
-    let detail = parsed
+    let mut detail = parsed
         .as_ref()
         .map(|p| {
             let code = p.error.as_deref().unwrap_or("oauth_error");
@@ -266,16 +294,27 @@ pub fn map_token_exchange_error(
         })
         .unwrap_or_else(|| format!("HTTP {}", status));
 
+    // Redact any configured client secret if it ever appeared in the error string
+    if let Some(secret) = configured_secret
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        detail = detail.replace(secret, "[REDACTED]");
+    }
+
     let lower_detail = detail.to_ascii_lowercase();
     if lower_detail.contains("client_secret is missing")
         || lower_detail.contains("client_secret")
+        || lower_detail.contains("invalid_client")
         || lower_detail.contains("unauthorized_client")
     {
         return ClassifiedError {
             kind: SyncErrorKind::Authentication,
             message: format!(
-                "Google OAuth code exchange failed: {}. The configured `google_client_id` belongs to a 'Web application' OAuth credential, which requires a confidential client_secret. RustTube is a native desktop public client using PKCE: in Google Cloud Console -> APIs & Services -> Credentials -> Create Credentials -> OAuth client ID, create an OAuth client with Application type 'Desktop app' (Desktop app clients automatically permit loopback redirect URI '{}' without a client secret), update `google_client_id` in config.toml, and sign in again.",
-                detail, redirect_uri
+                "Google OAuth code exchange failed: {}. Google's token endpoint requires a valid `client_secret` for this OAuth client. Set `google_client_secret` in Settings (or in `{}`) and verify that `google_client_id` and `google_client_secret` belong to the same standard Google OAuth 'Desktop app' client (with loopback redirect '{}', and without 'Use this client for an AI-powered agent' enabled).",
+                detail,
+                rusttube_core::AppConfig::config_file_path().display(),
+                redirect_uri
             ),
             occurred_at: now,
         };
@@ -284,7 +323,7 @@ pub fn map_token_exchange_error(
     ClassifiedError {
         kind: SyncErrorKind::Authentication,
         message: format!(
-            "Google OAuth code exchange failed: {}. Verify that your Google Cloud Console OAuth client type is 'Desktop app' and loopback redirect URI '{}' is permitted.",
+            "Google OAuth code exchange failed: {}. Verify that `google_client_id` and `google_client_secret` belong to the same Google OAuth 'Desktop app' client and loopback redirect URI '{}' is permitted.",
             detail, redirect_uri
         ),
         occurred_at: now,
@@ -425,23 +464,52 @@ pub fn open_system_browser(url: &str) -> std::result::Result<(), ClassifiedError
 pub struct OAuthSessionManager {
     client: Client,
     client_id: String,
+    client_secret: Option<String>,
     store: KeyringTokenStore,
+}
+
+impl std::fmt::Debug for OAuthSessionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthSessionManager")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 impl OAuthSessionManager {
     pub fn new(client_id: String, keyring_service: String) -> Self {
+        Self::with_client_secret(client_id, None, keyring_service)
+    }
+
+    pub fn with_client_secret(
+        client_id: String,
+        client_secret: Option<String>,
+        keyring_service: String,
+    ) -> Self {
+        let normalized_secret =
+            client_secret.and_then(|s| AuthConfig::normalize_client_secret_str(&s));
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(20))
                 .build()
                 .unwrap_or_default(),
             client_id,
+            client_secret: normalized_secret,
             store: KeyringTokenStore::new(keyring_service),
         }
     }
 
     pub fn set_client_id(&mut self, client_id: String) {
         self.client_id = client_id;
+    }
+
+    pub fn set_client_secret(&mut self, client_secret: Option<String>) {
+        self.client_secret =
+            client_secret.and_then(|s| AuthConfig::normalize_client_secret_str(&s));
     }
 
     pub fn validate_configured_client_id(&self) -> std::result::Result<String, ClassifiedError> {
@@ -453,8 +521,8 @@ impl OAuthSessionManager {
     /// 2. Binds a loopback listener strictly to `127.0.0.1:<redirect_port>`.
     /// 3. Opens the Google authorization URL in the system browser.
     /// 4. Waits for the `/callback` redirect with state validation and timeout.
-    /// 5. Exchanges the authorization code using PKCE (`code_verifier`, no client secret)
-    ///    and persists the resulting tokens in Windows Credential Manager.
+    /// 5. Exchanges the authorization code using PKCE (`code_verifier`) and optional
+    ///    Desktop `client_secret`, persisting the resulting tokens in Windows Credential Manager.
     pub async fn start_pkce_login(
         &self,
         redirect_port: u16,
@@ -470,6 +538,7 @@ impl OAuthSessionManager {
         cancel_rx: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> std::result::Result<StoredTokenSet, ClassifiedError> {
         let valid_client_id = self.validate_configured_client_id()?;
+        let configured_secret = self.client_secret.clone();
         let requested_port = if redirect_port == 0 {
             8989
         } else {
@@ -506,8 +575,9 @@ impl OAuthSessionManager {
         )
         .await?;
 
-        self.exchange_code_for_tokens_with_client_id(
+        self.exchange_code_for_tokens_with_credentials(
             &valid_client_id,
+            configured_secret.as_deref(),
             &code,
             &pkce.verifier,
             &redirect_uri,
@@ -515,8 +585,8 @@ impl OAuthSessionManager {
         .await
     }
 
-    /// Exchanges an authorization code for access and refresh tokens using PKCE (`code_verifier`),
-    /// without requiring or sending a `client_secret`.
+    /// Exchanges an authorization code for access and refresh tokens using PKCE (`code_verifier`)
+    /// and includes `client_secret` when configured on this session manager.
     pub async fn exchange_code_for_tokens(
         &self,
         code: &str,
@@ -524,8 +594,9 @@ impl OAuthSessionManager {
         redirect_uri: &str,
     ) -> std::result::Result<StoredTokenSet, ClassifiedError> {
         let valid_client_id = self.validate_configured_client_id()?;
-        self.exchange_code_for_tokens_with_client_id(
+        self.exchange_code_for_tokens_with_credentials(
             &valid_client_id,
+            self.client_secret.as_deref(),
             code,
             code_verifier,
             redirect_uri,
@@ -533,16 +604,22 @@ impl OAuthSessionManager {
         .await
     }
 
-    async fn exchange_code_for_tokens_with_client_id(
+    async fn exchange_code_for_tokens_with_credentials(
         &self,
         valid_client_id: &str,
+        client_secret: Option<&str>,
         code: &str,
         code_verifier: &str,
         redirect_uri: &str,
     ) -> std::result::Result<StoredTokenSet, ClassifiedError> {
         let now = Utc::now().timestamp();
-        let form_body =
-            build_token_exchange_form(valid_client_id, code, redirect_uri, code_verifier);
+        let form_body = build_token_exchange_form(
+            valid_client_id,
+            client_secret,
+            code,
+            redirect_uri,
+            code_verifier,
+        );
 
         let resp = self
             .client
@@ -563,7 +640,12 @@ impl OAuthSessionManager {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let err_text = resp.text().await.unwrap_or_default();
-            return Err(map_token_exchange_error(status, &err_text, redirect_uri));
+            return Err(map_token_exchange_error(
+                status,
+                &err_text,
+                redirect_uri,
+                client_secret,
+            ));
         }
 
         let body: GoogleTokenResponse = resp.json().await.map_err(|e| ClassifiedError {
@@ -633,11 +715,11 @@ impl OAuthSessionManager {
             });
         }
 
-        let form_body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("client_id", &valid_client_id)
-            .append_pair("refresh_token", refresh_token)
-            .append_pair("grant_type", "refresh_token")
-            .finish();
+        let form_body = build_refresh_token_form(
+            &valid_client_id,
+            self.client_secret.as_deref(),
+            refresh_token,
+        );
 
         let resp = self
             .client
@@ -656,14 +738,14 @@ impl OAuthSessionManager {
             })?;
 
         if !resp.status().is_success() {
-            return Err(ClassifiedError {
-                kind: SyncErrorKind::Authentication,
-                message: format!(
-                    "OAuth token refresh rejected with HTTP {}",
-                    resp.status().as_u16()
-                ),
-                occurred_at: now,
-            });
+            let status = resp.status().as_u16();
+            let err_text = resp.text().await.unwrap_or_default();
+            return Err(map_token_exchange_error(
+                status,
+                &err_text,
+                "refresh_token",
+                self.client_secret.as_deref(),
+            ));
         }
 
         let body: GoogleTokenResponse = resp.json().await.map_err(|e| ClassifiedError {
@@ -790,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn test_token_exchange_request_fields_and_refresh_token_preservation() {
+    fn test_token_exchange_request_fields_with_and_without_client_secret() {
         let previous = StoredTokenSet {
             access_token: "old_access".to_string(),
             refresh_token: "existing_refresh_token_keep_me".to_string(),
@@ -811,42 +893,70 @@ mod tests {
         assert_eq!(merged.refresh_token, "existing_refresh_token_keep_me");
         assert_eq!(merged.expires_at_unix, 5600);
 
-        let form = build_token_exchange_form(
+        // 1. When client_secret is None or empty, it is omitted and PKCE is sent
+        let form_without_secret = build_token_exchange_form(
             "client_123.apps.googleusercontent.com",
+            Some("   "),
             "4/0AeanS0_auth_code",
             "http://127.0.0.1:8989/callback",
             "pkce_verifier_xyz_123",
         );
-        let parsed_fields: HashMap<String, String> =
-            url::form_urlencoded::parse(form.as_bytes())
+        let parsed_no_secret: HashMap<String, String> =
+            url::form_urlencoded::parse(form_without_secret.as_bytes())
                 .into_owned()
                 .collect();
 
         assert_eq!(
-            parsed_fields.get("client_id").map(String::as_str),
+            parsed_no_secret.get("client_id").map(String::as_str),
             Some("client_123.apps.googleusercontent.com")
         );
         assert_eq!(
-            parsed_fields.get("code").map(String::as_str),
+            parsed_no_secret.get("code").map(String::as_str),
             Some("4/0AeanS0_auth_code")
         );
         assert_eq!(
-            parsed_fields.get("redirect_uri").map(String::as_str),
+            parsed_no_secret.get("redirect_uri").map(String::as_str),
             Some("http://127.0.0.1:8989/callback")
         );
         assert_eq!(
-            parsed_fields.get("code_verifier").map(String::as_str),
+            parsed_no_secret.get("code_verifier").map(String::as_str),
             Some("pkce_verifier_xyz_123")
         );
         assert_eq!(
-            parsed_fields.get("grant_type").map(String::as_str),
+            parsed_no_secret.get("grant_type").map(String::as_str),
             Some("authorization_code")
         );
-        assert!(!parsed_fields.contains_key("client_secret"));
+        assert!(!parsed_no_secret.contains_key("client_secret"));
+
+        // 2. When client_secret is configured, both client_secret and PKCE code_verifier are sent
+        let form_with_secret = build_token_exchange_form(
+            "client_123.apps.googleusercontent.com",
+            Some("  dummy_test_secret_not_real  "),
+            "4/0AeanS0_auth_code",
+            "http://127.0.0.1:8989/callback",
+            "pkce_verifier_xyz_123",
+        );
+        let parsed_with_secret: HashMap<String, String> =
+            url::form_urlencoded::parse(form_with_secret.as_bytes())
+                .into_owned()
+                .collect();
+
+        assert_eq!(
+            parsed_with_secret.get("client_secret").map(String::as_str),
+            Some("dummy_test_secret_not_real")
+        );
+        assert_eq!(
+            parsed_with_secret.get("code_verifier").map(String::as_str),
+            Some("pkce_verifier_xyz_123")
+        );
+        assert_eq!(
+            parsed_with_secret.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
     }
 
     #[test]
-    fn test_map_token_exchange_error_client_secret_missing() {
+    fn test_map_token_exchange_error_client_secret_missing_and_redacts_secret() {
         let google_error_json = r#"{
             "error": "invalid_request",
             "error_description": "client_secret is missing."
@@ -855,13 +965,31 @@ mod tests {
             400,
             google_error_json,
             "http://127.0.0.1:8989/callback",
+            Some("dummy_secret_value_for_redaction_test"),
         );
         assert_eq!(err.kind, SyncErrorKind::Authentication);
         assert!(err
             .message
             .contains("invalid_request (client_secret is missing.)"));
-        assert!(err.message.contains("Web application"));
-        assert!(err.message.contains("Desktop app"));
-        assert!(err.message.contains("http://127.0.0.1:8989/callback"));
+        assert!(err.message.contains("requires a valid `client_secret`"));
+        assert!(err.message.contains("same standard Google OAuth 'Desktop app' client"));
+        assert!(!err.message.contains("belongs to a 'Web application'"));
+        assert!(!err.message.contains("dummy_secret_value_for_redaction_test"));
+
+        // Also verify that if a secret value ever appeared in the upstream error description, it is redacted
+        let echoed_error_json = r#"{
+            "error": "invalid_client",
+            "error_description": "Rejected secret dummy_secret_value_for_redaction_test"
+        }"#;
+        let redacted_err = map_token_exchange_error(
+            401,
+            echoed_error_json,
+            "http://127.0.0.1:8989/callback",
+            Some("dummy_secret_value_for_redaction_test"),
+        );
+        assert!(!redacted_err
+            .message
+            .contains("dummy_secret_value_for_redaction_test"));
+        assert!(redacted_err.message.contains("[REDACTED]"));
     }
 }

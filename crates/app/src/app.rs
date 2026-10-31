@@ -216,8 +216,9 @@ impl RustTubeApp {
                 worker_cfg.ytdlp.binary_path.clone(),
                 worker_cfg.ytdlp.cookies_browser.clone(),
             );
-            let mut auth = OAuthSessionManager::new(
+            let mut auth = OAuthSessionManager::with_client_secret(
                 worker_cfg.auth.google_client_id.clone(),
+                worker_cfg.auth.normalized_client_secret(),
                 worker_cfg.auth.keyring_service_name.clone(),
             );
             let mut login_coordinator = LoginAttemptCoordinator::new();
@@ -274,6 +275,24 @@ impl RustTubeApp {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     UiCommand::StartGoogleLogin => {
+                        // Reload disk config if user edited %APPDATA%\RustTube\RustTube\config\config.toml manually while app was open
+                        let disk_cfg = AppConfig::load();
+                        if AuthConfig::is_placeholder_or_empty(&worker_cfg.auth.google_client_id)
+                            && !AuthConfig::is_placeholder_or_empty(&disk_cfg.auth.google_client_id)
+                        {
+                            worker_cfg.auth.google_client_id = disk_cfg.auth.google_client_id;
+                        }
+                        if AuthConfig::is_placeholder_or_empty_secret(
+                            &worker_cfg.auth.google_client_secret,
+                        ) && !AuthConfig::is_placeholder_or_empty_secret(
+                            &disk_cfg.auth.google_client_secret,
+                        ) {
+                            worker_cfg.auth.google_client_secret =
+                                disk_cfg.auth.google_client_secret;
+                        }
+                        auth.set_client_id(worker_cfg.auth.google_client_id.clone());
+                        auth.set_client_secret(worker_cfg.auth.normalized_client_secret());
+
                         login_coordinator.start_login(
                             &auth,
                             &api,
@@ -353,6 +372,7 @@ impl RustTubeApp {
                     UiCommand::SaveSettings(new_cfg) => {
                         worker_cfg = new_cfg;
                         auth.set_client_id(worker_cfg.auth.google_client_id.clone());
+                        auth.set_client_secret(worker_cfg.auth.normalized_client_secret());
                         match worker_cfg.save() {
                             Ok(()) => {
                                 let _ = evt_tx.send(AppEvent::Notification(

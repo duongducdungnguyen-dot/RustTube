@@ -1,9 +1,10 @@
 # RustTube Configuration
-# Stored persistently in %APPDATA%\RustTube\config.toml on Windows 11
-# Application updates never overwrite this file.
+# Stored persistently in %APPDATA%\RustTube\RustTube\config\config.toml on Windows 11
+# Application updates never overwrite this file. Never commit real secrets to version control.
 
 [auth]
 google_client_id = "YOUR_GOOGLE_OAUTH_DESKTOP_CLIENT_ID.apps.googleusercontent.com"
+google_client_secret = ""
 redirect_port = 8989
 keyring_service_name = "RustTube_Google_OAuth"
 auto_restore_session = true
