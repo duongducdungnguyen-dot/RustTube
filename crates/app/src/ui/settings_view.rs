@@ -6,6 +6,7 @@ pub fn render_settings_view(
     ui: &mut Ui,
     config: &mut AppConfig,
     profile: &Option<UserProfile>,
+    auth_in_progress: bool,
     sync_state: &SyncState,
     update_state: &UpdateState,
     cmd_tx: &UnboundedSender<UiCommand>,
@@ -21,6 +22,14 @@ pub fn render_settings_view(
             if ui.button("Sign Out").clicked() {
                 let _ = cmd_tx.send(UiCommand::Logout);
             }
+        } else if auth_in_progress {
+            ui.label("Sign-in already in progress — complete authorization in your browser or cancel to retry.");
+            ui.horizontal(|ui| {
+                ui.add_enabled(false, egui::Button::new("Sign-in in progress..."));
+                if ui.button("Cancel Sign-In").clicked() {
+                    let _ = cmd_tx.send(UiCommand::CancelGoogleLogin);
+                }
+            });
         } else {
             ui.label("Not signed in. Sign in with Google OAuth2 PKCE to sync subscriptions, playlists, and likes.");
             if ui.button("Sign In with Google").clicked() {

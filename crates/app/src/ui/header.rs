@@ -7,6 +7,7 @@ pub fn render_header(
     ui: &mut Ui,
     search_query: &mut String,
     profile: &Option<UserProfile>,
+    auth_in_progress: bool,
     sync_state: &SyncState,
     update_state: &UpdateState,
     can_go_back: bool,
@@ -68,6 +69,11 @@ pub fn render_header(
                 {
                     let _ = cmd_tx.send(UiCommand::TriggerAccountSync);
                 }
+            } else if auth_in_progress {
+                if ui.button("Cancel Sign-In").clicked() {
+                    let _ = cmd_tx.send(UiCommand::CancelGoogleLogin);
+                }
+                ui.add_enabled(false, egui::Button::new("Sign-in in progress..."));
             } else if ui.button("Sign In with Google").clicked() {
                 let _ = cmd_tx.send(UiCommand::StartGoogleLogin);
             }

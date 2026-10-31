@@ -95,6 +95,7 @@ pub enum UiCommand {
     SeekRelative(i64),
     // Auth & Sync
     StartGoogleLogin,
+    CancelGoogleLogin,
     Logout,
     TriggerAccountSync,
     SaveSettings(crate::config::AppConfig),
@@ -174,6 +175,9 @@ pub enum AppEvent {
     },
     AuthUpdated {
         profile: Option<UserProfile>,
+    },
+    AuthLoginProgress {
+        in_progress: bool,
     },
     SyncStateUpdated(SyncState),
     UpdateStateChanged(UpdateState),

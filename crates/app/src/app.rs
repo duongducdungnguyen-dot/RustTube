@@ -20,10 +20,137 @@ use rusttube_core::*;
 use rusttube_storage::{Database, HistoryRepo, SyncRepo, WatchLaterRepo};
 use rusttube_updater::UpdateManager;
 use rusttube_ytdlp::YtDlpRunner;
-use tokio::runtime::Handle;
+use std::future::Future;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+/// Coordinates in-flight Google OAuth2 PKCE login attempts off the command-dispatch loop so:
+/// 1. The command worker remains responsive while waiting up to 120s for the browser callback.
+/// 2. Repeated clicks on "Sign In with Google" never bind a second listener on the callback port.
+/// 3. Pending attempts can be cancelled immediately (`UiCommand::CancelGoogleLogin`), and
+///    `in_progress` is always reset on cancel, timeout, callback error, token/profile error, or success.
+#[derive(Default)]
+pub struct LoginAttemptCoordinator {
+    in_progress: Arc<AtomicBool>,
+    cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl LoginAttemptCoordinator {
+    pub fn new() -> Self {
+        Self {
+            in_progress: Arc::new(AtomicBool::new(false)),
+            cancel_tx: None,
+        }
+    }
+
+    pub fn is_in_progress(&self) -> bool {
+        self.in_progress.load(Ordering::SeqCst)
+    }
+
+    pub fn cancel_active(&mut self, evt_tx: &UnboundedSender<AppEvent>) -> bool {
+        let was_active = self.in_progress.swap(false, Ordering::SeqCst);
+        if let Some(tx) = self.cancel_tx.take() {
+            let _ = tx.send(());
+        }
+        if was_active {
+            let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: false });
+            let _ = evt_tx.send(AppEvent::Notification(
+                "Google Sign-In cancelled. You can start a new sign-in attempt whenever ready."
+                    .to_string(),
+            ));
+        }
+        was_active
+    }
+
+    pub fn start_login(
+        &mut self,
+        auth: &OAuthSessionManager,
+        api: &YouTubeApiClient,
+        redirect_port: u16,
+        evt_tx: UnboundedSender<AppEvent>,
+    ) {
+        let auth_clone = auth.clone();
+        let api_clone = api.clone();
+        self.start_login_with_future(auth, evt_tx, move |cancel_rx| async move {
+            let tokens = auth_clone
+                .start_pkce_login_cancellable(redirect_port, Some(cancel_rx))
+                .await?;
+            api_clone
+                .fetch_authenticated_profile(&tokens.access_token)
+                .await
+        });
+    }
+
+    pub fn start_login_with_future<F, Fut>(
+        &mut self,
+        auth: &OAuthSessionManager,
+        evt_tx: UnboundedSender<AppEvent>,
+        make_future: F,
+    ) where
+        F: FnOnce(tokio::sync::oneshot::Receiver<()>) -> Fut,
+        Fut: Future<Output = std::result::Result<UserProfile, ClassifiedError>> + Send + 'static,
+    {
+        if self.in_progress.load(Ordering::SeqCst) {
+            let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: true });
+            let _ = evt_tx.send(AppEvent::Notification(
+                "Sign-in already in progress — complete authorization in your browser or click Cancel Sign-In."
+                    .to_string(),
+            ));
+            return;
+        }
+
+        if let Err(err) = auth.validate_configured_client_id() {
+            self.in_progress.store(false, Ordering::SeqCst);
+            let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: false });
+            let _ = evt_tx.send(AppEvent::Error(err));
+            return;
+        }
+
+        self.in_progress.store(true, Ordering::SeqCst);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        self.cancel_tx = Some(cancel_tx);
+
+        let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: true });
+        let _ = evt_tx.send(AppEvent::Notification(
+            "Opening system browser for Google Sign-In...".to_string(),
+        ));
+
+        let in_progress_flag = Arc::clone(&self.in_progress);
+        let fut = make_future(cancel_rx);
+
+        tokio::spawn(async move {
+            let result = fut.await;
+            let still_marked_active = in_progress_flag.swap(false, Ordering::SeqCst);
+            let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: false });
+
+            match result {
+                Ok(profile) => {
+                    let display_name = profile.display_name.clone();
+                    let _ = evt_tx.send(AppEvent::AuthUpdated {
+                        profile: Some(profile),
+                    });
+                    let _ = evt_tx.send(AppEvent::Notification(format!(
+                        "Signed in with Google as {}",
+                        display_name
+                    )));
+                }
+                Err(err) => {
+                    // Avoid overwriting the explicit cancellation notice if cancel_active already fired
+                    if still_marked_active || !err.message.contains("cancelled") {
+                        let _ = evt_tx.send(AppEvent::Error(err));
+                    }
+                }
+            }
+        });
+    }
+}
+
 pub struct RustTubeApp {
+    _runtime: Runtime,
     config: AppConfig,
     current_page: ActivePage,
     nav_history: Vec<ActivePage>,
@@ -52,6 +179,7 @@ pub struct RustTubeApp {
     selected_video: Option<VideoItem>,
 
     profile: Option<UserProfile>,
+    auth_in_progress: bool,
     sync_state: SyncState,
     update_state: UpdateState,
     notification: Option<String>,
@@ -62,7 +190,7 @@ pub struct RustTubeApp {
 }
 
 impl RustTubeApp {
-    pub fn new(config: AppConfig, rt_handle: Handle) -> Self {
+    pub fn new(config: AppConfig, runtime: Runtime) -> Self {
         let (cmd_tx, mut cmd_rx) = unbounded_channel::<UiCommand>();
         let (evt_tx, evt_rx) = unbounded_channel::<AppEvent>();
 
@@ -82,7 +210,7 @@ impl RustTubeApp {
         let last_sync = sync_repo.get_last_sync_timestamp("account").unwrap_or(None);
 
         let mut worker_cfg = config.clone();
-        rt_handle.spawn(async move {
+        runtime.spawn(async move {
             let api = YouTubeApiClient::new();
             let ytdlp = YtDlpRunner::new(
                 worker_cfg.ytdlp.binary_path.clone(),
@@ -92,6 +220,7 @@ impl RustTubeApp {
                 worker_cfg.auth.google_client_id.clone(),
                 worker_cfg.auth.keyring_service_name.clone(),
             );
+            let mut login_coordinator = LoginAttemptCoordinator::new();
 
             // Automatic session restoration at startup when a valid client_id is configured
             if worker_cfg.auth.auto_restore_session
@@ -145,15 +274,18 @@ impl RustTubeApp {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     UiCommand::StartGoogleLogin => {
-                        handle_start_google_login(
+                        login_coordinator.start_login(
                             &auth,
                             &api,
                             worker_cfg.auth.redirect_port,
-                            &evt_tx,
-                        )
-                        .await;
+                            evt_tx.clone(),
+                        );
+                    }
+                    UiCommand::CancelGoogleLogin => {
+                        login_coordinator.cancel_active(&evt_tx);
                     }
                     UiCommand::Logout => {
+                        login_coordinator.cancel_active(&evt_tx);
                         handle_logout(&auth, &evt_tx);
                     }
                     UiCommand::TriggerAccountSync => {
@@ -346,6 +478,7 @@ impl RustTubeApp {
         });
 
         Self {
+            _runtime: runtime,
             config,
             current_page: ActivePage::Home,
             nav_history: Vec::new(),
@@ -372,6 +505,7 @@ impl RustTubeApp {
             watch_history: initial_hist,
             selected_video: None,
             profile: None,
+            auth_in_progress: false,
             sync_state: SyncState {
                 is_syncing: false,
                 last_successful_sync: last_sync,
@@ -396,10 +530,12 @@ pub async fn handle_start_google_login(
     evt_tx: &UnboundedSender<AppEvent>,
 ) {
     if let Err(err) = auth.validate_configured_client_id() {
+        let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: false });
         let _ = evt_tx.send(AppEvent::Error(err));
         return;
     }
 
+    let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: true });
     let _ = evt_tx.send(AppEvent::Notification(
         "Opening system browser for Google Sign-In...".to_string(),
     ));
@@ -408,6 +544,7 @@ pub async fn handle_start_google_login(
         Ok(tokens) => match api.fetch_authenticated_profile(&tokens.access_token).await {
             Ok(profile) => {
                 let display_name = profile.display_name.clone();
+                let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: false });
                 let _ = evt_tx.send(AppEvent::AuthUpdated {
                     profile: Some(profile),
                 });
@@ -417,16 +554,19 @@ pub async fn handle_start_google_login(
                 )));
             }
             Err(err) => {
+                let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: false });
                 let _ = evt_tx.send(AppEvent::Error(err));
             }
         },
         Err(err) => {
+            let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: false });
             let _ = evt_tx.send(AppEvent::Error(err));
         }
     }
 }
 
 pub fn handle_logout(auth: &OAuthSessionManager, evt_tx: &UnboundedSender<AppEvent>) {
+    let _ = evt_tx.send(AppEvent::AuthLoginProgress { in_progress: false });
     match auth.logout() {
         Ok(()) => {
             let _ = evt_tx.send(AppEvent::AuthUpdated { profile: None });
@@ -507,7 +647,11 @@ impl eframe::App for RustTubeApp {
                 }
                 AppEvent::AuthUpdated { profile } => {
                     self.profile = profile;
+                    self.auth_in_progress = false;
                     self.sync_state.last_error = None;
+                }
+                AppEvent::AuthLoginProgress { in_progress } => {
+                    self.auth_in_progress = in_progress;
                 }
                 AppEvent::SyncStateUpdated(state) => {
                     self.sync_state = state;
@@ -519,6 +663,9 @@ impl eframe::App for RustTubeApp {
                     self.notification = Some(msg);
                 }
                 AppEvent::Error(err) => {
+                    if err.kind == SyncErrorKind::Authentication {
+                        self.auth_in_progress = false;
+                    }
                     self.notification = Some(format!("Error ({:?}): {}", err.kind, err.message));
                     self.sync_state.last_error = Some(err);
                     self.is_loading = false;
@@ -535,6 +682,7 @@ impl eframe::App for RustTubeApp {
                 ui,
                 &mut self.search_query,
                 &self.profile,
+                self.auth_in_progress,
                 &self.sync_state,
                 &self.update_state,
                 !self.nav_history.is_empty(),
@@ -703,6 +851,7 @@ impl eframe::App for RustTubeApp {
                         ui,
                         &mut self.config,
                         &self.profile,
+                        self.auth_in_progress,
                         &self.sync_state,
                         &self.update_state,
                         &self.cmd_tx,
@@ -724,6 +873,8 @@ impl eframe::App for RustTubeApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_start_google_login_dispatch_emits_error_when_client_id_is_placeholder() {
@@ -736,9 +887,15 @@ mod tests {
 
         handle_start_google_login(&auth, &api, 8989, &evt_tx).await;
 
+        let first = evt_rx.try_recv().expect("must emit progress reset");
+        assert!(matches!(
+            first,
+            AppEvent::AuthLoginProgress { in_progress: false }
+        ));
+
         let evt = evt_rx
             .try_recv()
-            .expect("StartGoogleLogin must emit an event instead of being silently ignored");
+            .expect("StartGoogleLogin must emit an error event instead of being silently ignored");
         match evt {
             AppEvent::Error(err) => {
                 assert_eq!(err.kind, SyncErrorKind::Authentication);
@@ -746,6 +903,98 @@ mod tests {
             }
             other => panic!("Expected AppEvent::Error, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_worker_responsiveness_duplicate_clicks_cancellation_and_retry() {
+        let (evt_tx, mut evt_rx) = unbounded_channel::<AppEvent>();
+        let auth = OAuthSessionManager::new(
+            "1234567890-desktop.apps.googleusercontent.com".to_string(),
+            "RustTube_Test_Keyring_Coordinator".to_string(),
+        );
+        let mut coordinator = LoginAttemptCoordinator::new();
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+
+        // 1. Start first login attempt that waits for cancellation or long timeout
+        let count_ref1 = Arc::clone(&spawn_count);
+        coordinator.start_login_with_future(&auth, evt_tx.clone(), move |cancel_rx| async move {
+            count_ref1.fetch_add(1, Ordering::SeqCst);
+            let _ = cancel_rx.await;
+            Err(ClassifiedError {
+                kind: SyncErrorKind::Authentication,
+                message: "Google Sign-In was cancelled.".to_string(),
+                occurred_at: Utc::now().timestamp(),
+            })
+        });
+
+        assert!(coordinator.is_in_progress());
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
+
+        // 2. Duplicate click while active must NOT start a second listener/flow
+        let count_ref2 = Arc::clone(&spawn_count);
+        coordinator.start_login_with_future(&auth, evt_tx.clone(), move |_cancel_rx| async move {
+            count_ref2.fetch_add(1, Ordering::SeqCst);
+            unreachable!("Duplicate login click must not spawn a second OAuth attempt");
+        });
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
+        assert!(coordinator.is_in_progress());
+
+        // Drain events and confirm duplicate-click message was emitted while worker stays non-blocking
+        let mut saw_duplicate_notice = false;
+        while let Ok(evt) = evt_rx.try_recv() {
+            if let AppEvent::Notification(msg) = evt {
+                if msg.contains("Sign-in already in progress") {
+                    saw_duplicate_notice = true;
+                }
+            }
+        }
+        assert!(saw_duplicate_notice);
+
+        // 3. Cancel active attempt and verify state resets immediately
+        assert!(coordinator.cancel_active(&evt_tx));
+        assert!(!coordinator.is_in_progress());
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        while evt_rx.try_recv().is_ok() {}
+
+        // 4. Retry after failure/timeout resets state and allows a subsequent successful login
+        coordinator.start_login_with_future(&auth, evt_tx.clone(), move |_cancel_rx| async move {
+            Err(ClassifiedError {
+                kind: SyncErrorKind::Authentication,
+                message: "Google Sign-In timed out after 120 seconds".to_string(),
+                occurred_at: Utc::now().timestamp(),
+            })
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !coordinator.is_in_progress(),
+            "in_progress must reset after timeout/error"
+        );
+        while evt_rx.try_recv().is_ok() {}
+
+        // 5. Retry again and succeed
+        coordinator.start_login_with_future(&auth, evt_tx.clone(), move |_cancel_rx| async move {
+            Ok(UserProfile {
+                channel_id: "UC_TEST".to_string(),
+                display_name: "RustTube User".to_string(),
+                email: "@rusttube".to_string(),
+                handle: "@rusttube".to_string(),
+                avatar_url: String::new(),
+            })
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!coordinator.is_in_progress());
+
+        let mut saw_auth_updated = false;
+        while let Ok(evt) = evt_rx.try_recv() {
+            if let AppEvent::AuthUpdated {
+                profile: Some(prof),
+            } = evt
+            {
+                assert_eq!(prof.display_name, "RustTube User");
+                saw_auth_updated = true;
+            }
+        }
+        assert!(saw_auth_updated);
     }
 
     #[test]
@@ -757,6 +1006,12 @@ mod tests {
         );
 
         handle_logout(&auth, &evt_tx);
+
+        let first = evt_rx.try_recv().expect("must emit progress reset");
+        assert!(matches!(
+            first,
+            AppEvent::AuthLoginProgress { in_progress: false }
+        ));
 
         let evt = evt_rx
             .try_recv()

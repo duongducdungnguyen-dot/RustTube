@@ -243,11 +243,70 @@ pub(crate) fn merge_token_response(
     })
 }
 
+/// Maps HTTP error responses from `https://oauth2.googleapis.com/token` into a `ClassifiedError`
+/// that preserves the safe provider error detail (`error` and `error_description`) without
+/// exposing tokens or secrets, and provides actionable remediation when a Web application
+/// credential (`client_secret is missing.`) is used instead of a Desktop app credential.
+pub fn map_token_exchange_error(
+    status: u16,
+    err_text: &str,
+    redirect_uri: &str,
+) -> ClassifiedError {
+    let now = Utc::now().timestamp();
+    let parsed = serde_json::from_str::<GoogleOAuthErrorPayload>(err_text).ok();
+
+    let detail = parsed
+        .as_ref()
+        .map(|p| {
+            let code = p.error.as_deref().unwrap_or("oauth_error");
+            match p.error_description.as_deref() {
+                Some(desc) if !desc.trim().is_empty() => format!("{} ({})", code, desc.trim()),
+                _ => code.to_string(),
+            }
+        })
+        .unwrap_or_else(|| format!("HTTP {}", status));
+
+    let lower_detail = detail.to_ascii_lowercase();
+    if lower_detail.contains("client_secret is missing")
+        || lower_detail.contains("client_secret")
+        || lower_detail.contains("unauthorized_client")
+    {
+        return ClassifiedError {
+            kind: SyncErrorKind::Authentication,
+            message: format!(
+                "Google OAuth code exchange failed: {}. The configured `google_client_id` belongs to a 'Web application' OAuth credential, which requires a confidential client_secret. RustTube is a native desktop public client using PKCE: in Google Cloud Console -> APIs & Services -> Credentials -> Create Credentials -> OAuth client ID, create an OAuth client with Application type 'Desktop app' (Desktop app clients automatically permit loopback redirect URI '{}' without a client secret), update `google_client_id` in config.toml, and sign in again.",
+                detail, redirect_uri
+            ),
+            occurred_at: now,
+        };
+    }
+
+    ClassifiedError {
+        kind: SyncErrorKind::Authentication,
+        message: format!(
+            "Google OAuth code exchange failed: {}. Verify that your Google Cloud Console OAuth client type is 'Desktop app' and loopback redirect URI '{}' is permitted.",
+            detail, redirect_uri
+        ),
+        occurred_at: now,
+    }
+}
+
 /// Waits on the loopback `127.0.0.1` listener for the `/callback` redirect up to `timeout_duration`.
 pub async fn wait_for_loopback_callback(
     listener: TcpListener,
     expected_state: &str,
     timeout_duration: Duration,
+) -> std::result::Result<String, ClassifiedError> {
+    wait_for_loopback_callback_cancellable(listener, expected_state, timeout_duration, None).await
+}
+
+/// Waits on the loopback `127.0.0.1` listener for the `/callback` redirect up to `timeout_duration`,
+/// or aborts immediately if `cancel_rx` resolves so the loopback port is released right away.
+pub async fn wait_for_loopback_callback_cancellable(
+    listener: TcpListener,
+    expected_state: &str,
+    timeout_duration: Duration,
+    cancel_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> std::result::Result<String, ClassifiedError> {
     let wait_block = async {
         loop {
@@ -268,7 +327,8 @@ pub async fn wait_for_loopback_callback(
 
             // Ignore browser preflight/favicon requests while waiting for `/callback`
             if !first_line.contains("/callback") {
-                let not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let not_found =
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = stream.write_all(not_found.as_bytes()).await;
                 let _ = stream.flush().await;
                 continue;
@@ -301,16 +361,40 @@ pub async fn wait_for_loopback_callback(
         }
     };
 
-    match tokio::time::timeout(timeout_duration, wait_block).await {
-        Ok(result) => result,
-        Err(_) => Err(ClassifiedError {
-            kind: SyncErrorKind::Authentication,
-            message: format!(
-                "Google Sign-In timed out after {} seconds waiting for the browser callback.",
-                timeout_duration.as_secs()
-            ),
-            occurred_at: Utc::now().timestamp(),
-        }),
+    let timed_wait = tokio::time::timeout(timeout_duration, wait_block);
+
+    match cancel_rx {
+        Some(rx) => {
+            tokio::select! {
+                res = timed_wait => match res {
+                    Ok(inner) => inner,
+                    Err(_) => Err(ClassifiedError {
+                        kind: SyncErrorKind::Authentication,
+                        message: format!(
+                            "Google Sign-In timed out after {} seconds waiting for the browser callback.",
+                            timeout_duration.as_secs()
+                        ),
+                        occurred_at: Utc::now().timestamp(),
+                    }),
+                },
+                _ = rx => Err(ClassifiedError {
+                    kind: SyncErrorKind::Authentication,
+                    message: "Google Sign-In was cancelled.".to_string(),
+                    occurred_at: Utc::now().timestamp(),
+                }),
+            }
+        }
+        None => match timed_wait.await {
+            Ok(result) => result,
+            Err(_) => Err(ClassifiedError {
+                kind: SyncErrorKind::Authentication,
+                message: format!(
+                    "Google Sign-In timed out after {} seconds waiting for the browser callback.",
+                    timeout_duration.as_secs()
+                ),
+                occurred_at: Utc::now().timestamp(),
+            }),
+        },
     }
 }
 
@@ -337,6 +421,7 @@ pub fn open_system_browser(url: &str) -> std::result::Result<(), ClassifiedError
     })
 }
 
+#[derive(Clone)]
 pub struct OAuthSessionManager {
     client: Client,
     client_id: String,
@@ -374,6 +459,16 @@ impl OAuthSessionManager {
         &self,
         redirect_port: u16,
     ) -> std::result::Result<StoredTokenSet, ClassifiedError> {
+        self.start_pkce_login_cancellable(redirect_port, None).await
+    }
+
+    /// Runs the installed-app Google OAuth2 PKCE flow with optional cancellation support so a
+    /// pending callback wait can be abandoned immediately without keeping the loopback port bound.
+    pub async fn start_pkce_login_cancellable(
+        &self,
+        redirect_port: u16,
+        cancel_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> std::result::Result<StoredTokenSet, ClassifiedError> {
         let valid_client_id = self.validate_configured_client_id()?;
         let requested_port = if redirect_port == 0 {
             8989
@@ -403,15 +498,21 @@ impl OAuthSessionManager {
 
         open_system_browser(&auth_url)?;
 
-        let code = wait_for_loopback_callback(
+        let code = wait_for_loopback_callback_cancellable(
             listener,
             &pkce.state,
             DEFAULT_OAUTH_CALLBACK_TIMEOUT,
+            cancel_rx,
         )
         .await?;
 
-        self.exchange_code_for_tokens(&code, &pkce.verifier, &redirect_uri)
-            .await
+        self.exchange_code_for_tokens_with_client_id(
+            &valid_client_id,
+            &code,
+            &pkce.verifier,
+            &redirect_uri,
+        )
+        .await
     }
 
     /// Exchanges an authorization code for access and refresh tokens using PKCE (`code_verifier`),
@@ -423,9 +524,25 @@ impl OAuthSessionManager {
         redirect_uri: &str,
     ) -> std::result::Result<StoredTokenSet, ClassifiedError> {
         let valid_client_id = self.validate_configured_client_id()?;
+        self.exchange_code_for_tokens_with_client_id(
+            &valid_client_id,
+            code,
+            code_verifier,
+            redirect_uri,
+        )
+        .await
+    }
+
+    async fn exchange_code_for_tokens_with_client_id(
+        &self,
+        valid_client_id: &str,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+    ) -> std::result::Result<StoredTokenSet, ClassifiedError> {
         let now = Utc::now().timestamp();
         let form_body =
-            build_token_exchange_form(&valid_client_id, code, redirect_uri, code_verifier);
+            build_token_exchange_form(valid_client_id, code, redirect_uri, code_verifier);
 
         let resp = self
             .client
@@ -446,25 +563,7 @@ impl OAuthSessionManager {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let err_text = resp.text().await.unwrap_or_default();
-            let detail = serde_json::from_str::<GoogleOAuthErrorPayload>(&err_text)
-                .ok()
-                .map(|p| {
-                    let code = p.error.unwrap_or_else(|| "oauth_error".to_string());
-                    match p.error_description {
-                        Some(desc) if !desc.is_empty() => format!("{} ({})", code, desc),
-                        _ => code,
-                    }
-                })
-                .unwrap_or_else(|| format!("HTTP {}", status));
-
-            return Err(ClassifiedError {
-                kind: SyncErrorKind::Authentication,
-                message: format!(
-                    "Google OAuth code exchange failed: {}. Verify that your Google Cloud Console OAuth client type is 'Desktop app' and redirect URI '{}' is permitted.",
-                    detail, redirect_uri
-                ),
-                occurred_at: now,
-            });
+            return Err(map_token_exchange_error(status, &err_text, redirect_uri));
         }
 
         let body: GoogleTokenResponse = resp.json().await.map_err(|e| ClassifiedError {
@@ -598,6 +697,7 @@ impl OAuthSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_pkce_s256_challenge_and_redaction() {
@@ -647,14 +747,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_loopback_callback_timeout_and_success() {
+    async fn test_loopback_callback_timeout_cancellation_and_success() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let timeout_res =
             wait_for_loopback_callback(listener, "state_abc", Duration::from_millis(40)).await;
         assert!(timeout_res.is_err());
         assert!(timeout_res.unwrap_err().message.contains("timed out"));
 
-        let listener2 = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        // Verify cancellation immediately releases the bound port for a retry
+        let listener_cancel = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let bound_port = listener_cancel.local_addr().unwrap().port();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        let cancel_handle = tokio::spawn(async move {
+            wait_for_loopback_callback_cancellable(
+                listener_cancel,
+                "state_cancel",
+                Duration::from_secs(60),
+                Some(cancel_rx),
+            )
+            .await
+        });
+        let _ = cancel_tx.send(());
+        let cancel_res = cancel_handle.await.unwrap();
+        assert!(cancel_res.is_err());
+        assert!(cancel_res.unwrap_err().message.contains("cancelled"));
+
+        // Port must be free to rebind immediately for a retry
+        let listener2 = TcpListener::bind(("127.0.0.1", bound_port)).await.unwrap();
         let addr = listener2.local_addr().unwrap();
 
         let client_task = tokio::spawn(async move {
@@ -671,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn test_token_response_preserves_existing_refresh_token_when_omitted() {
+    fn test_token_exchange_request_fields_and_refresh_token_preservation() {
         let previous = StoredTokenSet {
             access_token: "old_access".to_string(),
             refresh_token: "existing_refresh_token_keep_me".to_string(),
@@ -694,12 +813,55 @@ mod tests {
 
         let form = build_token_exchange_form(
             "client_123.apps.googleusercontent.com",
-            "code_abc",
+            "4/0AeanS0_auth_code",
             "http://127.0.0.1:8989/callback",
-            "verifier_xyz",
+            "pkce_verifier_xyz_123",
         );
-        assert!(form.contains("grant_type=authorization_code"));
-        assert!(form.contains("code_verifier=verifier_xyz"));
-        assert!(!form.contains("client_secret"));
+        let parsed_fields: HashMap<String, String> =
+            url::form_urlencoded::parse(form.as_bytes())
+                .into_owned()
+                .collect();
+
+        assert_eq!(
+            parsed_fields.get("client_id").map(String::as_str),
+            Some("client_123.apps.googleusercontent.com")
+        );
+        assert_eq!(
+            parsed_fields.get("code").map(String::as_str),
+            Some("4/0AeanS0_auth_code")
+        );
+        assert_eq!(
+            parsed_fields.get("redirect_uri").map(String::as_str),
+            Some("http://127.0.0.1:8989/callback")
+        );
+        assert_eq!(
+            parsed_fields.get("code_verifier").map(String::as_str),
+            Some("pkce_verifier_xyz_123")
+        );
+        assert_eq!(
+            parsed_fields.get("grant_type").map(String::as_str),
+            Some("authorization_code")
+        );
+        assert!(!parsed_fields.contains_key("client_secret"));
+    }
+
+    #[test]
+    fn test_map_token_exchange_error_client_secret_missing() {
+        let google_error_json = r#"{
+            "error": "invalid_request",
+            "error_description": "client_secret is missing."
+        }"#;
+        let err = map_token_exchange_error(
+            400,
+            google_error_json,
+            "http://127.0.0.1:8989/callback",
+        );
+        assert_eq!(err.kind, SyncErrorKind::Authentication);
+        assert!(err
+            .message
+            .contains("invalid_request (client_secret is missing.)"));
+        assert!(err.message.contains("Web application"));
+        assert!(err.message.contains("Desktop app"));
+        assert!(err.message.contains("http://127.0.0.1:8989/callback"));
     }
 }

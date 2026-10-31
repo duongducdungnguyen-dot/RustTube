@@ -34,7 +34,7 @@ fn main() -> Result<()> {
         Box::new(move |cc| {
             theme::apply_obsidian_theme(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(RustTubeApp::new(config, rt.handle().clone())))
+            Ok(Box::new(RustTubeApp::new(config, rt)))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
