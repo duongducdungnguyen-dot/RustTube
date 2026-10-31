@@ -272,12 +272,12 @@ pub(crate) fn merge_token_response(
 
 /// Maps HTTP error responses from `https://oauth2.googleapis.com/token` into a `ClassifiedError`
 /// that preserves the safe provider error detail (`error` and `error_description`), never exposes
-/// any configured secret or token, and accurately explains when the token endpoint requires
-/// `client_secret` or when `client_id` / `client_secret` do not match the same Desktop OAuth client.
+/// any configured secret or token, and distinguishes authorization-code exchange failures from
+/// refresh failures so a stored token is not misreported as a redirect URI or a missing secret.
 pub fn map_token_exchange_error(
     status: u16,
     err_text: &str,
-    redirect_uri: &str,
+    request_context: &str,
     configured_secret: Option<&str>,
 ) -> ClassifiedError {
     let now = Utc::now().timestamp();
@@ -303,29 +303,53 @@ pub fn map_token_exchange_error(
     }
 
     let lower_detail = detail.to_ascii_lowercase();
-    if lower_detail.contains("client_secret is missing")
-        || lower_detail.contains("client_secret")
-        || lower_detail.contains("invalid_client")
-        || lower_detail.contains("unauthorized_client")
-    {
+    let is_refresh = request_context == "refresh_token";
+    let operation = if is_refresh {
+        "Google OAuth token refresh failed"
+    } else {
+        "Google OAuth code exchange failed"
+    };
+
+    if lower_detail.contains("client_secret is missing") || lower_detail.contains("client_secret") {
         return ClassifiedError {
             kind: SyncErrorKind::Authentication,
             message: format!(
-                "Google OAuth code exchange failed: {}. Google's token endpoint requires a valid `client_secret` for this OAuth client. Set `google_client_secret` in Settings (or in `{}`) and verify that `google_client_id` and `google_client_secret` belong to the same standard Google OAuth 'Desktop app' client (with loopback redirect '{}', and without 'Use this client for an AI-powered agent' enabled).",
+                "{}: {}. Google's token endpoint requires a valid `client_secret` for this OAuth client. Set `google_client_secret` in Settings (or in `{}`) and verify that `google_client_id` and `google_client_secret` belong to the same standard Google OAuth 'Desktop app' client{}.",
+                operation,
                 detail,
                 rusttube_core::AppConfig::config_file_path().display(),
-                redirect_uri
+                if is_refresh { String::new() } else { format!(" with loopback redirect '{}'", request_context) }
             ),
+            occurred_at: now,
+        };
+    }
+
+    if lower_detail.contains("invalid_client") || lower_detail.contains("unauthorized_client") {
+        let remediation = if is_refresh {
+            "Google rejected the saved refresh token for this OAuth client. Confirm the client ID and secret belong to the same enabled Desktop client. If the client ID changed, click 'Sign In with Google' to authorize the current client and replace the old refresh token."
+        } else {
+            "Google rejected this OAuth client. Confirm the client ID and secret belong to the same enabled standard Desktop client."
+        };
+        return ClassifiedError {
+            kind: SyncErrorKind::Authentication,
+            message: format!("{}: {}. {}", operation, detail, remediation),
             occurred_at: now,
         };
     }
 
     ClassifiedError {
         kind: SyncErrorKind::Authentication,
-        message: format!(
-            "Google OAuth code exchange failed: {}. Verify that `google_client_id` and `google_client_secret` belong to the same Google OAuth 'Desktop app' client and loopback redirect URI '{}' is permitted.",
-            detail, redirect_uri
-        ),
+        message: if is_refresh {
+            format!(
+                "{}: {}. If you recently changed the OAuth client ID, sign in again to obtain a refresh token for the current client.",
+                operation, detail
+            )
+        } else {
+            format!(
+                "{}: {}. Verify that `google_client_id` and `google_client_secret` belong to the same Google OAuth 'Desktop app' client and loopback redirect URI '{}' is permitted.",
+                operation, detail, request_context
+            )
+        },
         occurred_at: now,
     }
 }

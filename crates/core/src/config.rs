@@ -251,7 +251,7 @@ impl AppConfig {
                                 &local_cfg.auth.google_client_id,
                             )
                         {
-                            cfg.auth.google_client_id = local_cfg.auth.google_client_id;
+                            cfg.auth.google_client_id = local_cfg.auth.google_client_id.clone();
                             updated = true;
                         }
                         if cfg.auth.normalized_client_secret().is_none()

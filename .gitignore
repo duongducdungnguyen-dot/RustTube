@@ -1,7 +1,5 @@
 /target/
 **/*.rs.bk
-Cargo.lock
-
 # User configuration and tokens
 config.toml
 *.token

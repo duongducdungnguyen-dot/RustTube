@@ -276,19 +276,23 @@ impl RustTubeApp {
                 match cmd {
                     UiCommand::StartGoogleLogin => {
                         // Reload disk config if user edited %APPDATA%\RustTube\RustTube\config\config.toml manually while app was open
-                        let disk_cfg = AppConfig::load();
-                        if AuthConfig::is_placeholder_or_empty(&worker_cfg.auth.google_client_id)
-                            && !AuthConfig::is_placeholder_or_empty(&disk_cfg.auth.google_client_id)
-                        {
-                            worker_cfg.auth.google_client_id = disk_cfg.auth.google_client_id;
-                        }
-                        if AuthConfig::is_placeholder_or_empty_secret(
-                            &worker_cfg.auth.google_client_secret,
-                        ) && !AuthConfig::is_placeholder_or_empty_secret(
-                            &disk_cfg.auth.google_client_secret,
-                        ) {
-                            worker_cfg.auth.google_client_secret =
-                                disk_cfg.auth.google_client_secret;
+                        if let Ok(disk_cfg) = AppConfig::load() {
+                            if AuthConfig::is_placeholder_or_empty(&worker_cfg.auth.google_client_id)
+                                && !AuthConfig::is_placeholder_or_empty(
+                                    &disk_cfg.auth.google_client_id,
+                                )
+                            {
+                                worker_cfg.auth.google_client_id =
+                                    disk_cfg.auth.google_client_id.clone();
+                            }
+                            if AuthConfig::is_placeholder_or_empty_secret(
+                                &worker_cfg.auth.google_client_secret,
+                            ) && !AuthConfig::is_placeholder_or_empty_secret(
+                                &disk_cfg.auth.google_client_secret,
+                            ) {
+                                worker_cfg.auth.google_client_secret =
+                                    disk_cfg.auth.google_client_secret.clone();
+                            }
                         }
                         auth.set_client_id(worker_cfg.auth.google_client_id.clone());
                         auth.set_client_secret(worker_cfg.auth.normalized_client_secret());
@@ -358,6 +362,10 @@ impl RustTubeApp {
                                 ));
                             }
                             Ok(None) => {
+                                // The UI may still hold a profile from an earlier successful
+                                // login even though the credential store no longer has tokens.
+                                // Clear that stale profile so Settings offers Sign In again.
+                                let _ = evt_tx.send(AppEvent::AuthUpdated { profile: None });
                                 let _ = evt_tx.send(AppEvent::Error(ClassifiedError {
                                     kind: SyncErrorKind::Authentication,
                                     message: "Not signed in. Please click 'Sign In with Google' first.".to_string(),
